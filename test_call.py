@@ -49,6 +49,10 @@ assert call.request('/say', {'text': 'секунду', 'wait': False})['events']
 assert call.speech_queue.get_nowait()['text'] == 'секунду'
 call.speech_queue.task_done()
 
+assert call.request('/say', {'text': '', 'patience': 0})['events'] == []
+assert call.request('/mute', {'muted': True}) == {'muted': True} and call.view['muted']
+assert call.request('/mute', {'muted': False}) == {'muted': False} and not call.view['muted']
+
 call.heard_events.put({'text': 'подожди я не договорил', 'interrupted': False})
 assert call.request('/hangup') == {
     'hung_up': False, 'events': [{'text': 'подожди я не договорил', 'interrupted': False}]}

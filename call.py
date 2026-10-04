@@ -2,7 +2,8 @@
 
   call [--from-user] [привет]    позвонить, поздороваться и дождаться первой реплики
   say [--no-wait] [--important]  озвучить текст (stdin или аргументы) и дождаться реплики
-  listen                         дождаться реплики, ничего не говоря
+  listen [--wait=секунды]        дождаться реплики, ничего не говоря; --wait=0 - только уже сказанное
+  mute [on|off]                  выключить или включить микрофон пользователя
   hangup                         положить трубку, когда договорят и диктор, и пользователь
   key <ключ Groq>                сохранить ключ: с ним распознаёт Whisper, без него Google
 """
@@ -45,11 +46,13 @@ RECOGNITION_LANGUAGE = 'ru-RU'
 SILENCE_ENDING_UTTERANCE = 0.8
 SPEECH_STARTING_UTTERANCE = 0.16
 SPEECH_PROBABILITY = 0.35
+CONFIDENT_SPEECH_PROBABILITY = 0.7
+CONFIDENT_SPEECH_BLOCKS = 4
 LONGEST_UTTERANCE = 30
 ECHO_TAIL = 0.3
 ECHO_MEMORY = 3
 ECHO_LEARNING_BLOCKS = 10
-ECHO_MARGIN = 1.8
+ECHO_MARGIN = 1.4
 COMMA_PAUSE_RANGE = (0.1, 0.25)
 CONJUNCTIONS = {'что', 'чтобы', 'а', 'но', 'если', 'когда', 'потому', 'поэтому', 'хотя', 'пока', 'зато',
                 'однако', 'где', 'который', 'которая', 'которое', 'которые'}
@@ -71,6 +74,8 @@ SPEECH_API_URL = ('https://www.google.com/speech-api/v2/recognize?client=chromiu
                   f'&lang={RECOGNITION_LANGUAGE}&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw')
 WHISPER_API_URL = 'https://api.groq.com/openai/v1/audio/transcriptions'
 WHISPER_MODEL = 'whisper-large-v3-turbo'
+WHISPER_SILENCE_PHRASES = {'продолжение следует', 'спасибо за просмотр', 'субтитры сделал dimatorzok',
+                           'субтитры создавал dimatorzok', 'редактор субтитров а.семкин корректор а.егорова'}
 
 speech_queue = queue.Queue()
 recorded_utterances = queue.Queue()
@@ -175,8 +180,14 @@ def say(body):
     already_heard = take_heard(0) if wait and not important else []
     if text and not already_heard:
         speech_queue.put({'text': text, 'important': important})
-    events = already_heard or (take_heard(REPLY_TIMEOUT) if wait else [])
+    patience = min(body.get('patience', REPLY_TIMEOUT), REPLY_TIMEOUT)
+    events = already_heard or (take_heard(patience) if wait else [])
     return {'events': events, 'unspoken': bool(text and already_heard)}
+
+
+def set_mute(body):
+    view['muted'] = bool(body.get('muted'))
+    return {'muted': view['muted']}
 
 
 def hang_up(body):
@@ -194,7 +205,7 @@ def hang_up(body):
     return {'hung_up': True, 'events': []}
 
 
-COMMANDS = {'/answered': wait_for_answer, '/say': say, '/hangup': hang_up}
+COMMANDS = {'/answered': wait_for_answer, '/say': say, '/hangup': hang_up, '/mute': set_mute}
 
 
 class BridgeHandler(BaseHTTPRequestHandler):
@@ -357,9 +368,12 @@ def listener():
     recent_levels = collections.deque(maxlen=4)
     echo_until = 0
     utterance, speech_time, silence_time, pauses = None, 0, 0, []
-    spoken_blocks, hush_time, loudness = 0, 0, 0
+    spoken_blocks, confident_blocks, hush_time, loudness = 0, 0, 0, 0
 
     def send_utterance():
+        if confident_blocks < CONFIDENT_SPEECH_BLOCKS:
+            view['status'] = 'слушаю'
+            return
         comma_positions = [place / spoken_blocks for place in comma_pauses(pauses, recent_pauses)]
         audio = b''.join(part.tobytes() for part in utterance)
         recorded_utterances.put((audio, comma_positions, announcer_interrupted.is_set()))
@@ -403,12 +417,15 @@ def listener():
             if speech_time >= SPEECH_STARTING_UTTERANCE:
                 utterance, silence_time, pauses = list(lead_in), 0, []
                 spoken_blocks, hush_time, loudness = round(SPEECH_STARTING_UTTERANCE / BLOCK_SECONDS), 0, level
+                confident_blocks = 0
                 user_speaking.set()
-                if announcer_speaking.is_set():
-                    announcer_interrupted.set()
                 view['status'] = 'слушаю…'
             continue
         utterance.append(block)
+        if probability[0, 0] > CONFIDENT_SPEECH_PROBABILITY:
+            confident_blocks += 1
+            if confident_blocks == CONFIDENT_SPEECH_BLOCKS and announcer_speaking.is_set():
+                announcer_interrupted.set()
         if is_speech and level > loudness * 0.2:
             if hush_time >= COMMA_PAUSE_RANGE[0]:
                 pauses.append((spoken_blocks, hush_time))
@@ -453,7 +470,11 @@ def recognize_with_whisper(audio, key):
                'User-Agent': 'claude-call'}
     with urllib.request.urlopen(urllib.request.Request(WHISPER_API_URL, b''.join(parts), headers),
                                 timeout=15) as response:
-        return json.load(response)['text'].strip()
+        text = json.load(response)['text'].strip()
+    # ponytail: на тишине и шуме Whisper уверенно выдаёт одни и те же фразы из субтитров, а его
+    # оценки уверенности их не отличают от речи. Шум отсекает детектор речи, а этот список -
+    # страховка на случай, если шум всё же прошёл.
+    return '' if text.strip(' .…!').lower() in WHISPER_SILENCE_PHRASES else text
 
 
 def recognize_with_google(audio):
@@ -607,8 +628,12 @@ def main():
         elif command in ('say', 'listen'):
             wait = '--no-wait' not in flags
             text = '' if command == 'listen' else words or sys.stdin.read()
-            print_events(request('/say', {'text': text.strip(), 'wait': wait, 'important': '--important' in flags}),
-                         wait)
+            body = {'text': text.strip(), 'wait': wait, 'important': '--important' in flags}
+            body.update({'patience': float(flag.partition('=')[2]) for flag in flags if flag.startswith('--wait=')})
+            print_events(request('/say', body), wait)
+        elif command == 'mute':
+            muted = request('/mute', {'muted': words != 'off'})['muted']
+            print('[микрофон пользователя выключен]' if muted else '[микрофон пользователя включён]')
         elif command == 'key':
             settings['groq_key'] = words
             save_settings()
