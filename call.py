@@ -351,6 +351,14 @@ def listener():
     recent_pauses = collections.deque(maxlen=40)
     utterance, speech_time, silence_time, pauses = None, 0, 0, []
     spoken_blocks, hush_time, loudness = 0, 0, 0
+
+    def send_utterance():
+        comma_positions = [place / spoken_blocks for place in comma_pauses(pauses, recent_pauses)]
+        audio = b''.join(part.tobytes() for part in utterance)
+        recorded_utterances.put((audio, comma_positions, announcer_interrupted.is_set()))
+        announcer_interrupted.clear()
+        view['status'] = 'распознаю…'
+
     while True:
         block = blocks.get()
         # ponytail: эхоподавления нет. С колонками диктор попадает в микрофон и перебивает сам себя,
@@ -359,6 +367,8 @@ def listener():
         deaf = (call_state != 'talking' or view['muted']
                 or announcer_speaking.is_set() and (view['locked'] or not settings['barge_in']))
         if deaf:
+            if utterance is not None and view['muted'] and call_state == 'talking':
+                send_utterance()
             utterance, speech_time = None, 0
             lead_in.clear()
             user_speaking.clear()
@@ -391,14 +401,10 @@ def listener():
             hush_time += BLOCK_SECONDS
         silence_time = 0 if is_speech else silence_time + BLOCK_SECONDS
         if silence_time >= SILENCE_ENDING_UTTERANCE or len(utterance) * BLOCK_SECONDS >= LONGEST_UTTERANCE:
-            comma_positions = [place / spoken_blocks for place in comma_pauses(pauses, recent_pauses)]
-            audio = b''.join(part.tobytes() for part in utterance)
-            recorded_utterances.put((audio, comma_positions, announcer_interrupted.is_set()))
-            announcer_interrupted.clear()
+            send_utterance()
             utterance, speech_time = None, 0
             lead_in.clear()
             user_speaking.clear()
-            view['status'] = 'распознаю…'
 
 
 def comma_pauses(pauses, recent_pauses):
