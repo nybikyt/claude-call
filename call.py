@@ -46,6 +46,10 @@ SILENCE_ENDING_UTTERANCE = 0.8
 SPEECH_STARTING_UTTERANCE = 0.16
 SPEECH_PROBABILITY = 0.35
 LONGEST_UTTERANCE = 30
+ECHO_TAIL = 0.3
+ECHO_MEMORY = 3
+ECHO_LEARNING_BLOCKS = 10
+ECHO_MARGIN = 1.8
 COMMA_PAUSE_RANGE = (0.1, 0.25)
 CONJUNCTIONS = {'что', 'чтобы', 'а', 'но', 'если', 'когда', 'потому', 'поэтому', 'хотя', 'пока', 'зато',
                 'однако', 'где', 'который', 'которая', 'которое', 'которые'}
@@ -349,6 +353,9 @@ def listener():
     stream.start()
     lead_in = collections.deque(maxlen=16)
     recent_pauses = collections.deque(maxlen=40)
+    echo_levels = collections.deque(maxlen=round(ECHO_MEMORY / BLOCK_SECONDS))
+    recent_levels = collections.deque(maxlen=4)
+    echo_until = 0
     utterance, speech_time, silence_time, pauses = None, 0, 0, []
     spoken_blocks, hush_time, loudness = 0, 0, 0
 
@@ -361,11 +368,11 @@ def listener():
 
     while True:
         block = blocks.get()
-        # ponytail: эхоподавления нет. С колонками диктор попадает в микрофон и перебивает сам себя,
-        # поэтому перебивание отключается переключателем в окне. Настоящий AEC нужен, если
-        # понадобится перебивать и без наушников.
+        if announcer_speaking.is_set():
+            echo_until = time.monotonic() + ECHO_TAIL
+        hearing_echo = time.monotonic() < echo_until
         deaf = (call_state != 'talking' or view['muted']
-                or announcer_speaking.is_set() and (view['locked'] or not settings['barge_in']))
+                or hearing_echo and (view['locked'] or not settings['barge_in']))
         if deaf:
             if utterance is not None and view['muted'] and call_state == 'talking':
                 send_utterance()
@@ -379,7 +386,18 @@ def listener():
         context = samples[:, -64:]
         is_speech = probability[0, 0] > SPEECH_PROBABILITY
         level = float(np.abs(samples[0, 64:]).mean())
+        recent_levels.append(level)
         if utterance is None:
+            if hearing_echo:
+                # ponytail: настоящего эхоподавления нет. Голос диктора из колонок отсекается по
+                # громкости: речью считается только то, что заметно громче недавнего эха. Перебить
+                # диктора через колонки можно, лишь говоря громче него; полноценный AEC нужен,
+                # если этого станет мало.
+                louder_than_echo = (len(echo_levels) >= ECHO_LEARNING_BLOCKS
+                                    and max(recent_levels) > ECHO_MARGIN * np.percentile(echo_levels, 90))
+                if not louder_than_echo:
+                    echo_levels.append(level)
+                is_speech = is_speech and louder_than_echo
             lead_in.append(block)
             speech_time = speech_time + BLOCK_SECONDS if is_speech else 0
             if speech_time >= SPEECH_STARTING_UTTERANCE:
