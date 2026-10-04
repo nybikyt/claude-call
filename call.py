@@ -51,8 +51,11 @@ CONFIDENT_SPEECH_BLOCKS = 4
 LONGEST_UTTERANCE = 30
 ECHO_TAIL = 0.3
 ECHO_MEMORY = 3
-ECHO_LEARNING_BLOCKS = 10
-ECHO_MARGIN = 1.4
+ECHO_LEARNING_BLOCKS = 15
+ECHO_DELAY_BLOCKS = 12
+ECHO_LEAD_IN_BLOCKS = 3
+ECHO_REFERENCE_FLOOR = 0.005
+ECHO_MARGIN = 1.6
 COMMA_PAUSE_RANGE = (0.1, 0.25)
 CONJUNCTIONS = {'что', 'чтобы', 'а', 'но', 'если', 'когда', 'потому', 'поэтому', 'хотя', 'пока', 'зато',
                 'однако', 'где', 'который', 'которая', 'которое', 'которые'}
@@ -70,6 +73,7 @@ SAMPLE_RATE = 16000
 BLOCK_SAMPLES = 512
 BLOCK_SECONDS = BLOCK_SAMPLES / SAMPLE_RATE
 PLAYBACK_RATE = 48000
+PLAYBACK_BLOCK_SAMPLES = round(PLAYBACK_RATE * BLOCK_SECONDS)
 SPEECH_API_URL = ('https://www.google.com/speech-api/v2/recognize?client=chromium&pFilter=0'
                   f'&lang={RECOGNITION_LANGUAGE}&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw')
 WHISPER_API_URL = 'https://api.groq.com/openai/v1/audio/transcriptions'
@@ -78,6 +82,7 @@ WHISPER_SILENCE_PHRASES = {'продолжение следует', 'спаси�
                            'субтитры создавал dimatorzok', 'редактор субтитров а.семкин корректор а.егорова'}
 
 speech_queue = queue.Queue()
+played_sentences = collections.deque(maxlen=3)
 recorded_utterances = queue.Queue()
 heard_events = queue.Queue()
 ringing_finished = threading.Event()
@@ -262,6 +267,7 @@ def watchdog():
 
 
 def speaker():
+    import numpy as np
     import sounddevice as sd
 
     def stopped():
@@ -280,7 +286,11 @@ def speaker():
         with torch.jit.optimized_execution(False), torch.inference_mode():
             audio = model.apply_tts(ssml_text=f'<speak>{marked}</speak>', speaker=FAST_VOICE,
                                     sample_rate=PLAYBACK_RATE)
-        sd.play(audio.numpy(), PLAYBACK_RATE)
+        samples = audio.numpy()
+        blocks = len(samples) // PLAYBACK_BLOCK_SAMPLES
+        envelope = np.abs(samples[:blocks * PLAYBACK_BLOCK_SAMPLES]).reshape(blocks, PLAYBACK_BLOCK_SAMPLES).mean(axis=1)
+        played_sentences.append((time.monotonic(), envelope))
+        sd.play(samples, PLAYBACK_RATE)
         while sd.get_stream().active and not stopped():
             time.sleep(0.02)
         sd.stop()
@@ -300,6 +310,7 @@ def speaker():
 
     def say_with_light_voice(sentence):
         speak_async, purge = 1, 2
+        played_sentences.append((time.monotonic(), None))
         light_voice.Speak(sentence, speak_async)
         while not light_voice.WaitUntilDone(20) and not stopped():
             pass
@@ -364,9 +375,21 @@ def listener():
     stream.start()
     lead_in = collections.deque(maxlen=16)
     recent_pauses = collections.deque(maxlen=40)
-    echo_levels = collections.deque(maxlen=round(ECHO_MEMORY / BLOCK_SECONDS))
-    recent_levels = collections.deque(maxlen=4)
+    echo_strengths = collections.deque(maxlen=round(ECHO_MEMORY / BLOCK_SECONDS))
+    recent_strengths = collections.deque(maxlen=4)
+    echo_without_reference = False
     echo_until = 0
+
+    def announcer_loudness(now):
+        loudest = 0.0
+        for started, envelope in list(played_sentences):
+            if envelope is None:
+                return None
+            position = int((now - started) / BLOCK_SECONDS)
+            heard_now = envelope[max(position - ECHO_DELAY_BLOCKS, 0):max(position + 2, 0)]
+            if len(heard_now):
+                loudest = max(loudest, float(heard_now.max()))
+        return loudest
     utterance, speech_time, silence_time, pauses = None, 0, 0, []
     spoken_blocks, confident_blocks, hush_time, loudness = 0, 0, 0, 0
 
@@ -400,18 +423,24 @@ def listener():
         context = samples[:, -64:]
         is_speech = probability[0, 0] > SPEECH_PROBABILITY
         level = float(np.abs(samples[0, 64:]).mean())
-        recent_levels.append(level)
         if utterance is None:
             if hearing_echo:
-                # ponytail: настоящего эхоподавления нет. Голос диктора из колонок отсекается по
-                # громкости: речью считается только то, что заметно громче недавнего эха. Перебить
-                # диктора через колонки можно, лишь говоря громче него; полноценный AEC нужен,
-                # если этого станет мало.
-                louder_than_echo = (len(echo_levels) >= ECHO_LEARNING_BLOCKS
-                                    and max(recent_levels) > ECHO_MARGIN * np.percentile(echo_levels, 90))
+                # ponytail: настоящего эхоподавления нет. Микрофон сравнивает громкость с тем, что
+                # диктор произносит в этот момент, и запоминает обычное соотношение - это эхо из
+                # колонок. Речью считается только то, что заметно его превышает. Тихий голос поверх
+                # громкого диктора не пройдёт; полноценный AEC нужен, если этого станет мало.
+                announcer_level = announcer_loudness(time.monotonic())
+                if (announcer_level is None) != echo_without_reference:
+                    echo_without_reference = announcer_level is None
+                    echo_strengths.clear()
+                strength = level if announcer_level is None else level / (announcer_level + ECHO_REFERENCE_FLOOR)
+                recent_strengths.append(strength)
+                louder_than_echo = (len(echo_strengths) >= ECHO_LEARNING_BLOCKS
+                                    and max(recent_strengths) > ECHO_MARGIN * np.percentile(echo_strengths, 90))
                 if not louder_than_echo:
-                    echo_levels.append(level)
-                    lead_in.clear()
+                    echo_strengths.append(strength)
+                    while len(lead_in) > ECHO_LEAD_IN_BLOCKS:
+                        lead_in.popleft()
                 is_speech = is_speech and louder_than_echo
             lead_in.append(block)
             speech_time = speech_time + BLOCK_SECONDS if is_speech else 0
