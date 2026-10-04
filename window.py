@@ -10,8 +10,12 @@ BACKGROUND, PLATE, BUTTON_GREY, SWITCH_OFF = '#1e1f22', '#2b2d31', '#383a40', '#
 TEXT, DIM_TEXT = '#f2f3f5', '#b5bac1'
 GREEN, RED, CLAUDE_ORANGE = '#23a55a', '#f23f43', '#d97757'
 BUTTON_CORNER = 0.3
+AVATAR_RADIUS = 0.34
+SPEAKING_RING_RADIUS = 0.37
 SUPERSAMPLING = 3
 PULSE_FRAMES = 12
+SWITCH_FRAMES = 6
+SWITCH_FRAME_MILLISECONDS = 16
 REFRESH_MILLISECONDS = 40
 LONG_TEXT_LENGTH = 160
 DWM_DARK_MODE, DWM_CAPTION_COLOR = 20, 35
@@ -116,27 +120,31 @@ def button_image(size, fill, glyph):
     return render(size, size, paint)
 
 
-def switch_image(width, height, on):
+def switch_image(width, height, turned_on):
     def paint(image, draw):
         draw.rounded_rectangle((0, 0, image.width - 1, image.height - 1), radius=image.height / 2,
-                               fill=GREEN if on else SWITCH_OFF)
+                               fill=blend(GREEN, SWITCH_OFF, turned_on))
         margin = image.height * 0.08
         knob = image.height - 2 * margin
-        left = image.width - margin - knob if on else margin
+        left = margin + (image.width - 2 * margin - knob) * turned_on
         draw.ellipse((left, margin, left + knob, margin + knob), fill='white')
     return render(width, height, paint)
 
 
-def avatar_image(logo, size, pulse=None):
+def avatar_image(logo, size, halo_radius=None, halo_color=None):
     def paint(image, draw):
-        middle, plate_radius = image.width / 2, image.width * 0.34
-        if pulse is not None:
-            ring_radius = plate_radius + (middle - plate_radius) * pulse
-            draw.ellipse(circle(middle, ring_radius), fill=blend(CLAUDE_ORANGE, BACKGROUND, 0.4 * (1 - pulse)))
-        draw.ellipse(circle(middle, plate_radius), fill=PLATE)
-        mark = logo.resize((round(plate_radius * 1.2),) * 2, Image.LANCZOS)
+        middle = image.width / 2
+        if halo_radius:
+            draw.ellipse(circle(middle, image.width * halo_radius), fill=halo_color)
+        draw.ellipse(circle(middle, image.width * AVATAR_RADIUS), fill=PLATE)
+        mark = logo.resize((round(image.width * AVATAR_RADIUS * 1.2),) * 2, Image.LANCZOS)
         image.alpha_composite(mark, ((image.width - mark.width) // 2,) * 2)
     return render(size, size, paint)
+
+
+def ringing_avatar(logo, size, progress):
+    return avatar_image(logo, size, AVATAR_RADIUS + (0.5 - AVATAR_RADIUS) * progress,
+                        blend(CLAUDE_ORANGE, BACKGROUND, 0.4 * (1 - progress)))
 
 
 def taskbar_icon(logo):
@@ -183,15 +191,17 @@ def run(app, from_user):
     muted_fill = '#%02x%02x%02x' % blend(RED, BACKGROUND, 0.22)
     images = {name: ImageTk.PhotoImage(image) for name, image in {
         'still': avatar_image(logo, avatar_size),
+        'speaking': avatar_image(logo, avatar_size, SPEAKING_RING_RADIUS, GREEN),
         'answer': button_image(button_size, GREEN, partial(icon, 'call', color='white')),
         'hangup': button_image(button_size, RED, partial(icon, 'call_end', color='white')),
         'microphone': button_image(button_size, BUTTON_GREY, partial(icon, 'microphone', color=TEXT)),
         'muted': button_image(button_size, muted_fill, partial(icon, 'microphone_off', color=RED)),
         'locked': button_image(button_size, RED, partial(icon, 'microphone_off', color='white')),
-        'on': switch_image(px(44), px(26), on=True),
-        'off': switch_image(px(44), px(26), on=False),
     }.items()}
-    pulse = [ImageTk.PhotoImage(avatar_image(logo, avatar_size, step / PULSE_FRAMES)) for step in range(PULSE_FRAMES)]
+    pulse = [ImageTk.PhotoImage(ringing_avatar(logo, avatar_size, step / PULSE_FRAMES))
+             for step in range(PULSE_FRAMES)]
+    switch_frames = [ImageTk.PhotoImage(switch_image(px(44), px(26), step / SWITCH_FRAMES))
+                     for step in range(SWITCH_FRAMES + 1)]
 
     avatar = tk.Label(root, image=images['still'], bg=BACKGROUND)
     avatar.pack(pady=(px(6), 0))
@@ -230,13 +240,22 @@ def run(app, from_user):
     def switch_row(setting, caption):
         row = tk.Frame(root, bg=BACKGROUND)
         tk.Label(row, text=caption, font=('Segoe UI', 10), fg=TEXT, bg=BACKGROUND).pack(side='left')
-        switch = tk.Label(row, image=images['on' if app.settings[setting] else 'off'], bg=BACKGROUND, cursor='hand2')
+        frame = SWITCH_FRAMES if app.settings[setting] else 0
+        switch = tk.Label(row, image=switch_frames[frame], bg=BACKGROUND, cursor='hand2')
         switch.pack(side='right')
+
+        def slide():
+            nonlocal frame
+            target = SWITCH_FRAMES if app.settings[setting] else 0
+            if frame != target:
+                frame += 1 if target > frame else -1
+                switch.config(image=switch_frames[frame])
+                root.after(SWITCH_FRAME_MILLISECONDS, slide)
 
         def flip(event):
             app.settings[setting] = not app.settings[setting]
             app.save_settings()
-            switch.config(image=images['on' if app.settings[setting] else 'off'])
+            slide()
 
         switch.bind('<Button-1>', flip)
         row.pack(side='bottom', fill='x', padx=px(28), pady=px(6))
@@ -274,8 +293,10 @@ def run(app, from_user):
         tick += 1
         if from_user and app.call_state == 'ringing' and app.voice_ready.is_set():
             app.answer()
-        animated = app.call_state == 'ringing' or app.announcer_speaking.is_set()
-        avatar.config(image=pulse[tick // 2 % PULSE_FRAMES] if animated else images['still'])
+        if app.call_state == 'ringing':
+            avatar.config(image=pulse[tick // 2 % PULSE_FRAMES])
+        else:
+            avatar.config(image=images['speaking' if app.announcer_speaking.is_set() else 'still'])
         if app.call_state == 'talking' and not connected:
             connected = True
             title.config(text='Claude')
@@ -286,10 +307,7 @@ def run(app, from_user):
             muted, locked = app.view['muted'], app.view['locked']
             mute_button.picture.config(image=images['locked' if locked else 'muted' if muted else 'microphone'])
             mute_button.label.config(text='Микрофон выкл' if muted else 'Микрофон')
-            if muted:
-                status.config(text='микрофон выключен', fg=RED)
-            else:
-                status.config(text=app.view['status'], fg=DIM_TEXT)
+            status.config(text=app.view['status'])
             show_live_text(app.view['live'])
         root.after(REFRESH_MILLISECONDS, refresh)
 

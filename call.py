@@ -4,9 +4,11 @@
   say [--no-wait] [--important]  озвучить текст (stdin или аргументы) и дождаться реплики
   listen                         дождаться реплики, ничего не говоря
   hangup                         положить трубку, когда договорят и диктор, и пользователь
+  key <ключ Groq>                сохранить ключ: с ним распознаёт Whisper, без него Google
 """
 import collections
 import html
+import io
 import itertools
 import json
 import os
@@ -21,6 +23,7 @@ import threading
 import time
 import traceback
 import urllib.request
+import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -40,8 +43,8 @@ FAST_VOICE = 'eugene'
 LIGHT_VOICE = 'Pavel'
 RECOGNITION_LANGUAGE = 'ru-RU'
 SILENCE_ENDING_UTTERANCE = 0.8
-SPEECH_STARTING_UTTERANCE = 0.2
-SPEECH_PROBABILITY = 0.5
+SPEECH_STARTING_UTTERANCE = 0.16
+SPEECH_PROBABILITY = 0.35
 LONGEST_UTTERANCE = 30
 COMMA_PAUSE_RANGE = (0.1, 0.25)
 CONJUNCTIONS = {'что', 'чтобы', 'а', 'но', 'если', 'когда', 'потому', 'поэтому', 'хотя', 'пока', 'зато',
@@ -62,6 +65,8 @@ BLOCK_SECONDS = BLOCK_SAMPLES / SAMPLE_RATE
 PLAYBACK_RATE = 48000
 SPEECH_API_URL = ('https://www.google.com/speech-api/v2/recognize?client=chromium&pFilter=0'
                   f'&lang={RECOGNITION_LANGUAGE}&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw')
+WHISPER_API_URL = 'https://api.groq.com/openai/v1/audio/transcriptions'
+WHISPER_MODEL = 'whisper-large-v3-turbo'
 
 speech_queue = queue.Queue()
 recorded_utterances = queue.Queue()
@@ -405,16 +410,48 @@ def comma_pauses(pauses, recent_pauses):
     return [place for place, length in pauses if length >= threshold]
 
 
-def recognize(audio):
-    # ponytail: неофициальный адрес Google с общим ключом из библиотеки SpeechRecognition. Ничего не
-    # считает локально, но лимиты не гарантированы и знаков препинания нет. Замена: Whisper
-    # (локально нужен torch с CUDA) или платный API с личным ключом.
+def recognize_with_whisper(audio, key):
+    recording = io.BytesIO()
+    with wave.open(recording, 'wb') as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(SAMPLE_RATE)
+        wav.writeframes(audio)
+    boundary = secrets.token_hex(16)
+    fields = {'model': WHISPER_MODEL, 'language': RECOGNITION_LANGUAGE[:2], 'response_format': 'json',
+              'temperature': '0'}
+    parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+             for name, value in fields.items()]
+    parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="speech.wav"\r\n'
+                 'Content-Type: audio/wav\r\n\r\n'.encode() + recording.getvalue()
+                 + f'\r\n--{boundary}--\r\n'.encode())
+    headers = {'Authorization': f'Bearer {key}', 'Content-Type': f'multipart/form-data; boundary={boundary}',
+               'User-Agent': 'claude-call'}
+    with urllib.request.urlopen(urllib.request.Request(WHISPER_API_URL, b''.join(parts), headers),
+                                timeout=15) as response:
+        return json.load(response)['text'].strip()
+
+
+def recognize_with_google(audio):
+    # ponytail: неофициальный адрес Google с общим ключом из библиотеки SpeechRecognition. Работает без
+    # регистрации, но лимиты не гарантированы, знаков препинания нет, а редкие слова и сокращения он
+    # подгоняет под словарные. Поэтому с ключом Groq распознаёт Whisper, а это запасной путь.
     request = urllib.request.Request(SPEECH_API_URL, audio, {'Content-Type': f'audio/l16; rate={SAMPLE_RATE}'})
     with urllib.request.urlopen(request, timeout=15) as response:
         results = [result for line in response.read().decode().splitlines()
                    for result in json.loads(line or '{}').get('result', [])]
     return ' '.join(result['alternative'][0].get('transcript', '').strip()
                     for result in results if result.get('alternative')).strip()
+
+
+def transcribe(audio, comma_positions):
+    key = os.environ.get('GROQ_API_KEY') or settings.get('groq_key')
+    if key:
+        try:
+            return recognize_with_whisper(audio, key)
+        except OSError as error:
+            print(f'Whisper не ответил ({error}), распознаю через Google', file=sys.stderr, flush=True)
+    return with_commas(recognize_with_google(audio), comma_positions)
 
 
 def with_commas(text, comma_positions):
@@ -437,7 +474,7 @@ def recognizer():
     while True:
         audio, comma_positions, interrupted = recorded_utterances.get()
         try:
-            text = with_commas(recognize(audio), comma_positions)
+            text = transcribe(audio, comma_positions)
             print(f'реплика {len(audio) / 2 / SAMPLE_RATE:.1f} с: {text!r}', file=sys.stderr, flush=True)
             if text or interrupted:
                 heard_events.put({'text': text, 'interrupted': interrupted})
@@ -548,6 +585,10 @@ def main():
             text = '' if command == 'listen' else words or sys.stdin.read()
             print_events(request('/say', {'text': text.strip(), 'wait': wait, 'important': '--important' in flags}),
                          wait)
+        elif command == 'key':
+            settings['groq_key'] = words
+            save_settings()
+            print('[ключ Groq сохранён, со следующего звонка распознаёт Whisper]')
         elif command == 'hangup':
             result = request('/hangup')
             if result['hung_up']:
