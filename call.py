@@ -411,6 +411,7 @@ def listener():
                                     and max(recent_levels) > ECHO_MARGIN * np.percentile(echo_levels, 90))
                 if not louder_than_echo:
                     echo_levels.append(level)
+                    lead_in.clear()
                 is_speech = is_speech and louder_than_echo
             lead_in.append(block)
             speech_time = speech_time + BLOCK_SECONDS if is_speech else 0
