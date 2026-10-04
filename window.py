@@ -1,7 +1,7 @@
 import ctypes
+import re
 import tkinter as tk
 from functools import partial
-from math import cos, radians, sin
 from types import SimpleNamespace
 
 from PIL import Image, ImageDraw, ImageTk
@@ -15,6 +15,27 @@ PULSE_FRAMES = 12
 REFRESH_MILLISECONDS = 40
 LONG_TEXT_LENGTH = 160
 DWM_DARK_MODE, DWM_CAPTION_COLOR = 20, 35
+
+ICON_VIEWBOX = 960
+ICON_CURVE_STEPS = 8
+ICON_PATHS = {
+    'microphone': 'M480-400q-50 0-85-35t-35-85v-240q0-50 35-85t85-35q50 0 85 35t35 85v240q0 50-35 85t-85 35Zm-40 '
+                  '240v-83q-92-13-157.5-78T203-479q-2-17 9-29t28-12q17 0 28.5 11.5T284-480q14 70 69.5 115T480-320q72 '
+                  '0 127-45.5T676-480q4-17 15.5-28.5T720-520q17 0 28 12t9 29q-14 91-79 157t-158 79v83q0 17-11.5 '
+                  '28.5T480-120q-17 0-28.5-11.5T440-160Z',
+    'microphone_off': 'M672-377q-14-8-18-24.5t4-30.5q7-11 11.5-23.5T676-481q4-17 15.5-28t28.5-11q17 0 28 12t9 29q-3 '
+                      '23-10.5 45T727-392q-8 14-24.5 18.5T672-377ZM532-542 383-691q-11-11-17-25.5t-6-30.5v-13q0-50 '
+                      '35-85t85-35q50 0 85 35t35 85v189q0 27-24.5 37.5T532-542Zm-92 382v-84q-92-12-157.5-77T203-479q'
+                      '-2-17 9-29t28-12q17 0 28.5 11.5T284-480q14 70 69.5 115T480-320q34 0 64.5-10.5T600-360l57 57q'
+                      '-29 23-63.5 38.5T520-244v84q0 17-11.5 28.5T480-120q-17 0-28.5-11.5T440-160Zm324 76L84-764q-11'
+                      '-11-11-28t11-28q11-11 28-11t28 11l680 680q11 11 11 28t-11 28q-11 11-28 11t-28-11Z',
+    'call': 'M798-120q-125 0-247-54.5T329-329Q229-429 174.5-551T120-798q0-18 12-30t30-12h162q14 0 25 9.5t13 22.5l26 '
+            '140q2 16-1 27t-11 19l-97 98q20 37 47.5 71.5T387-386q31 31 65 57.5t72 48.5l94-94q9-9 23.5-13.5T670-390l'
+            '138 28q14 4 23 14.5t9 23.5v162q0 18-12 30t-30 12Z',
+    'call_end': 'M480-640q118 0 232.5 47.5T916-450q12 12 12 28t-12 28l-92 90q-11 11-25.5 12t-26.5-8l-116-88q-8-6-12'
+                '-14t-4-18v-114q-38-12-78-19t-82-7q-42 0-82 7t-78 19v114q0 10-4 18t-12 14l-116 88q-12 9-26.5 8T136'
+                '-304l-92-90q-12-12-12-28t12-28q88-95 203-142.5T480-640Z',
+}
 
 
 def blend(color, other, share):
@@ -32,43 +53,66 @@ def render(width, height, paint):
     return image.resize((width, height), Image.LANCZOS)
 
 
-def handset(side, color, lifted):
-    layer = Image.new('RGBA', (side, side))
-    middle, arc_centre, radius, thickness = side / 2, side * 0.66, side * 0.30, side * 0.13
-    outer = radius + thickness / 2
-    ImageDraw.Draw(layer).arc((middle - outer, arc_centre - outer, middle + outer, arc_centre + outer),
-                              208, 332, fill=color, width=round(thickness))
-    for angle, lean in ((208, -1), (332, 1)):
-        cap = Image.new('RGBA', (side, side))
-        ImageDraw.Draw(cap).rounded_rectangle(
-            (middle - side * 0.115, middle - side * 0.085, middle + side * 0.115, middle + side * 0.085),
-            radius=side * 0.05, fill=color)
-        cap = cap.rotate(-lean * 28, resample=Image.BICUBIC)
-        end_x = middle + radius * cos(radians(angle))
-        end_y = arc_centre + radius * sin(radians(angle))
-        layer.alpha_composite(cap, (round(end_x - middle - lean * side * 0.01), round(end_y - middle + side * 0.035)))
-    return layer.rotate(135, resample=Image.BICUBIC) if lifted else layer
+def icon_outlines(path):
+    tokens = re.findall(r'[A-Za-z]|-?\d*\.?\d+', path)
+    outlines, position, start, control, command, index = [], (0.0, 0.0), (0.0, 0.0), None, '', 0
+
+    def numbers(count):
+        nonlocal index
+        index += count
+        return [float(token) for token in tokens[index - count:index]]
+
+    while index < len(tokens):
+        if tokens[index].isalpha():
+            command = tokens[index]
+            index += 1
+        kind = command.upper()
+        base_x, base_y = position if command.islower() else (0.0, 0.0)
+        if kind == 'Z':
+            position, control = start, None
+        elif kind == 'M':
+            x, y = numbers(2)
+            position = start = (base_x + x, base_y + y)
+            outlines.append([position])
+            command, control = 'l' if command.islower() else 'L', None
+        elif kind in 'LHV':
+            x, y = numbers(2) if kind == 'L' else (numbers(1)[0], None) if kind == 'H' else (None, numbers(1)[0])
+            position = (position[0] if x is None else base_x + x, position[1] if y is None else base_y + y)
+            outlines[-1].append(position)
+            control = None
+        elif kind in 'QT':
+            if kind == 'Q':
+                control_x, control_y, x, y = numbers(4)
+                control = (base_x + control_x, base_y + control_y)
+            else:
+                x, y = numbers(2)
+                control = (2 * position[0] - control[0], 2 * position[1] - control[1]) if control else position
+            target = (base_x + x, base_y + y)
+            for step in range(1, ICON_CURVE_STEPS + 1):
+                done = step / ICON_CURVE_STEPS
+                left = 1 - done
+                outlines[-1].append(tuple(left * left * a + 2 * left * done * b + done * done * c
+                                          for a, b, c in zip(position, control, target)))
+            position = target
+        else:
+            raise ValueError(f'команда {command} в контуре значка не поддержана')
+    return outlines
 
 
-def microphone(side, color, crossed_over=None):
+def icon(name, side, color, share=0.56):
     layer = Image.new('RGBA', (side, side))
     draw = ImageDraw.Draw(layer)
-    line = round(side * 0.055)
-    draw.rounded_rectangle((side * 0.405, side * 0.20, side * 0.595, side * 0.56), radius=side * 0.095, fill=color)
-    draw.arc((side * 0.30, side * 0.24, side * 0.70, side * 0.66), 15, 165, fill=color, width=line)
-    draw.line((side * 0.5, side * 0.66, side * 0.5, side * 0.77), fill=color, width=line)
-    draw.rounded_rectangle((side * 0.39, side * 0.76, side * 0.61, side * 0.76 + line), radius=line / 2, fill=color)
-    if crossed_over:
-        slash = (side * 0.27, side * 0.21, side * 0.75, side * 0.79)
-        draw.line(slash, fill=crossed_over, width=round(side * 0.13))
-        draw.line(slash, fill=color, width=round(side * 0.06))
+    size, margin = side * share, side * (1 - share) / 2
+    for outline in icon_outlines(ICON_PATHS[name]):
+        draw.polygon([(margin + x / ICON_VIEWBOX * size, margin + (y + ICON_VIEWBOX) / ICON_VIEWBOX * size)
+                      for x, y in outline], fill=color)
     return layer
 
 
 def button_image(size, fill, glyph):
     def paint(image, draw):
         draw.rounded_rectangle((0, 0, image.width - 1, image.height - 1), radius=image.width * BUTTON_CORNER, fill=fill)
-        image.alpha_composite(glyph(image.width))
+        image.alpha_composite(glyph(side=image.width))
     return render(size, size, paint)
 
 
@@ -96,11 +140,11 @@ def avatar_image(logo, size, pulse=None):
 
 
 def taskbar_icon(logo):
-    icon = Image.new('RGBA', (256, 256))
-    icon.alpha_composite(logo.resize((256, 256), Image.LANCZOS))
-    ImageDraw.Draw(icon).rounded_rectangle((116, 116, 255, 255), radius=140 * BUTTON_CORNER, fill=GREEN)
-    icon.alpha_composite(handset(140, 'white', lifted=True), (116, 116))
-    return icon
+    image = Image.new('RGBA', (256, 256))
+    image.alpha_composite(logo.resize((256, 256), Image.LANCZOS))
+    ImageDraw.Draw(image).rounded_rectangle((116, 116, 255, 255), radius=140 * BUTTON_CORNER, fill=GREEN)
+    image.alpha_composite(icon('call', 140, 'white', share=0.62), (116, 116))
+    return image
 
 
 def run(app, from_user):
@@ -130,19 +174,20 @@ def run(app, from_user):
         ctypes.windll.dwmapi.DwmSetWindowAttribute(window_handle, attribute, ctypes.byref(ctypes.c_int(value)), 4)
 
     logo = Image.open(app.HERE / 'logo.png')
-    icon = taskbar_icon(logo)
-    icons = [ImageTk.PhotoImage(icon.resize((side, side), Image.LANCZOS)) for side in (256, 48, 32, 16)]
-    root.iconphoto(True, *icons)
+    taskbar_image = taskbar_icon(logo)
+    taskbar_images = [ImageTk.PhotoImage(taskbar_image.resize((side, side), Image.LANCZOS))
+                      for side in (256, 48, 32, 16)]
+    root.iconphoto(True, *taskbar_images)
 
     button_size, avatar_size = px(60), px(150)
     muted_fill = '#%02x%02x%02x' % blend(RED, BACKGROUND, 0.22)
     images = {name: ImageTk.PhotoImage(image) for name, image in {
         'still': avatar_image(logo, avatar_size),
-        'answer': button_image(button_size, GREEN, partial(handset, color='white', lifted=True)),
-        'hangup': button_image(button_size, RED, partial(handset, color='white', lifted=False)),
-        'microphone': button_image(button_size, BUTTON_GREY, partial(microphone, color=TEXT)),
-        'muted': button_image(button_size, muted_fill, partial(microphone, color=RED, crossed_over=muted_fill)),
-        'locked': button_image(button_size, RED, partial(microphone, color='white', crossed_over=RED)),
+        'answer': button_image(button_size, GREEN, partial(icon, 'call', color='white')),
+        'hangup': button_image(button_size, RED, partial(icon, 'call_end', color='white')),
+        'microphone': button_image(button_size, BUTTON_GREY, partial(icon, 'microphone', color=TEXT)),
+        'muted': button_image(button_size, muted_fill, partial(icon, 'microphone_off', color=RED)),
+        'locked': button_image(button_size, RED, partial(icon, 'microphone_off', color='white')),
         'on': switch_image(px(44), px(26), on=True),
         'off': switch_image(px(44), px(26), on=False),
     }.items()}
@@ -162,7 +207,7 @@ def run(app, from_user):
     buttons = tk.Frame(root, bg=BACKGROUND)
     buttons.pack()
 
-    def round_button(image, caption, command):
+    def call_button(image, caption, command):
         frame = tk.Frame(buttons, bg=BACKGROUND)
         picture = tk.Label(frame, image=images[image], bg=BACKGROUND, cursor='hand2')
         picture.pack()
@@ -172,11 +217,12 @@ def run(app, from_user):
         return SimpleNamespace(frame=frame, picture=picture, label=label)
 
     def toggle_mute():
-        app.view['muted'] = not app.view['muted']
+        if not app.view['locked']:
+            app.view['muted'] = not app.view['muted']
 
-    answer_button = round_button('answer', 'Ответить', app.answer)
-    mute_button = round_button('microphone', 'Микрофон', toggle_mute)
-    hangup_button = round_button('hangup', 'Сбросить', app.finish)
+    answer_button = call_button('answer', 'Ответить', app.answer)
+    mute_button = call_button('microphone', 'Микрофон', toggle_mute)
+    hangup_button = call_button('hangup', 'Сбросить', app.finish)
     if not from_user:
         answer_button.frame.pack(side='left', padx=px(18))
     hangup_button.frame.pack(side='left', padx=px(18))

@@ -60,7 +60,7 @@ SAMPLE_RATE = 16000
 BLOCK_SAMPLES = 512
 BLOCK_SECONDS = BLOCK_SAMPLES / SAMPLE_RATE
 PLAYBACK_RATE = 48000
-SPEECH_API_URL = ('https://www.google.com/speech-api/v2/recognize?client=chromium'
+SPEECH_API_URL = ('https://www.google.com/speech-api/v2/recognize?client=chromium&pFilter=0'
                   f'&lang={RECOGNITION_LANGUAGE}&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw')
 
 speech_queue = queue.Queue()

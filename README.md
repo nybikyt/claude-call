@@ -49,7 +49,7 @@ python -m pip install -r %USERPROFILE%\.claude\skills\claude-call\requirements.t
 | Файл | Что в нём |
 |---|---|
 | `call.py` | команды, сервер, микрофон, распознавание, диктор |
-| `window.py` | окно и значки, которые рисуются кодом |
+| `window.py` | окно; значки рисуются из контуров, записанных прямо в коде |
 | `SKILL.md` | инструкция для Claude, как вести звонок |
 | `test_call.py` | проверка сервера и расстановки запятых без окна и звука |
 
@@ -88,4 +88,8 @@ python test_call.py
 
 ## Лицензия
 
-Код распространяется по лицензии MIT, текст в файле `LICENSE`. Модели Silero скачиваются отдельно и живут по своим лицензиям: [silero-models](https://github.com/snakers4/silero-models) и [silero-vad](https://github.com/snakers4/silero-vad).
+Код распространяется по лицензии MIT, текст в файле `LICENSE`.
+
+Значки трубки и микрофона взяты из набора [Material Symbols](https://github.com/google/material-design-icons) от Google, лицензия Apache 2.0.
+
+Модели Silero скачиваются отдельно и живут по своим лицензиям: [silero-models](https://github.com/snakers4/silero-models) и [silero-vad](https://github.com/snakers4/silero-vad).
