@@ -64,7 +64,6 @@ INCOMING_RINGTONE = 'Ring05.wav'
 DUCKED_VOLUME = 0.2
 
 RING_TIMEOUT = 60
-AUTO_ANSWER_SECONDS = 2
 REPLY_TIMEOUT = 540
 HANGUP_TIMEOUT = 45
 CLAUDE_SILENCE_LIMIT = 900
@@ -93,7 +92,7 @@ user_speaking = threading.Event()
 voice_ready = threading.Event()
 call_state = 'ringing'
 view = {'status': '', 'live': '', 'muted': False, 'locked': False}
-settings = {'barge_in': True, 'fast': True, 'auto_answer': False}
+settings = {'barge_in': True, 'fast': True}
 if SETTINGS_FILE.exists():
     settings.update(json.loads(SETTINGS_FILE.read_text()))
 start_time = last_command_time = time.monotonic()

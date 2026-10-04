@@ -165,7 +165,7 @@ def run(app, from_user):
     def px(points):
         return round(points * scale)
 
-    width, height = px(300), px(536)
+    width, height = px(300), px(500)
     root.title('Звонок Claude')
     root.configure(bg=BACKGROUND)
     root.resizable(False, False)
@@ -261,7 +261,6 @@ def run(app, from_user):
         row.pack(side='bottom', fill='x', padx=px(28), pady=px(6))
 
     tk.Frame(root, height=px(12), bg=BACKGROUND).pack(side='bottom')
-    switch_row('auto_answer', 'Автоответ')
     switch_row('barge_in', 'Перебивать голосом')
     switch_row('fast', 'Быстрый голос')
 
@@ -292,9 +291,7 @@ def run(app, from_user):
         if app.call_state == 'ended':
             return root.destroy()
         tick += 1
-        rang_long_enough = tick * REFRESH_MILLISECONDS >= app.AUTO_ANSWER_SECONDS * 1000
-        if app.call_state == 'ringing' and app.voice_ready.is_set() and (
-                from_user or app.settings['auto_answer'] and rang_long_enough):
+        if from_user and app.call_state == 'ringing' and app.voice_ready.is_set():
             app.answer()
         if app.call_state == 'ringing':
             avatar.config(image=pulse[tick // 2 % PULSE_FRAMES])
