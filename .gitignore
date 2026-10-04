@@ -1,0 +1,7 @@
+voice.pt
+vad.onnx
+*.part
+settings.json
+ducked.json
+.token
+__pycache__/

@@ -1,0 +1,6 @@
+sounddevice
+pycaw
+numpy
+onnxruntime
+torch
+Pillow
