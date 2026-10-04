@@ -1,113 +1,113 @@
 # claude-call
 
-Голосовой звонок с Claude Code. Набираешь `/claude-call`, открывается маленькое окно, ты говоришь в микрофон, а Claude отвечает голосом в той же сессии, где у него открыт твой проект. Его можно перебить на полуслове. Он может позвонить и сам, например когда закончил долгую задачу или ему нужно твоё решение.
+Voice calls with Claude Code. Type `/claude-call`, a small window opens, you talk into the microphone and Claude answers out loud in the same session where your project is open. You can interrupt it mid-sentence. Claude can also call you on its own, for example when a long task is done or it needs a decision from you.
 
-Проект неофициальный. Claude и логотип Claude принадлежат Anthropic, автор с компанией не связан.
+This is an unofficial project. Claude and the Claude logo belong to Anthropic, and the author is not affiliated with the company.
 
-Работает на Windows 10 и 11. Речь и диктор рассчитаны на русский язык.
+It runs on Windows 10 and 11. The window, the voice and the speech recognition are set up for Russian.
 
-## Что внутри звонка
+## What a call is like
 
-Окно показывает, кто кому звонит: «Звоню Claude…», если звонок начал ты, и «Claude звонит Вам» с рингтоном, если начал он. Пока идёт входящий вызов, остальные программы звучат тише, после ответа громкость возвращается.
+The window shows who is calling whom: "Звоню Claude…" when you started the call, and "Claude звонит Вам" with a ringtone when Claude did. While an incoming call is ringing, other programs play quieter, and their volume comes back once you answer.
 
-Микрофон слушает постоянно, нажимать ничего не нужно. Детектор речи отличает голос от стука клавиатуры и прочего шума, поэтому случайный звук Claude не перебьёт. Реплика считается законченной после 0,8 секунды тишины.
+The microphone listens all the time, so there is nothing to hold down. A speech detector tells a voice apart from keyboard clatter and other noise, so a random sound will not cut Claude off. A phrase counts as finished after 0.8 seconds of silence.
 
-Заговоришь поверх диктора, и он замолчит, а Claude получит твои слова с пометкой, что его перебили. Для важных сообщений у него есть режим, в котором перебить нельзя: кнопка микрофона в это время красная и зачёркнутая.
+Start talking over the voice and it stops, and Claude gets your words marked as an interruption. For important messages Claude has a mode where it cannot be interrupted, and the microphone button turns red and crossed out while that lasts.
 
-Трубку Claude положить не может, пока ты говоришь: команда дождётся конца фразы и вернёт ему твои слова.
+Claude cannot hang up while you are still talking. The command waits for the end of your phrase and hands your words back to it.
 
-В окне два переключателя. «Быстрый голос» выбирает диктора: нейросетевой звучит приятнее, но держит около 300 МБ памяти, системный голос Windows памяти почти не занимает. «Перебивать голосом» можно выключить, если через колонки диктор всё равно обрывает сам себя: тогда микрофон молчит, пока Claude говорит.
+The window has two switches. "Быстрый голос" picks the voice: the neural one sounds nicer but holds about 300 MB of memory, while the Windows system voice takes almost none. "Перебивать голосом" can be turned off if the voice keeps cutting itself off through loudspeakers, and then the microphone stays silent while Claude speaks.
 
-## Установка
+## Installation
 
-Нужны Claude Code и Python 3.10 или новее.
+You need Claude Code and Python 3.10 or newer.
 
 ```
 git clone https://github.com/nybikyt/claude-call %USERPROFILE%\.claude\skills\claude-call
 python -m pip install -r %USERPROFILE%\.claude\skills\claude-call\requirements.txt
 ```
 
-Модели в репозиторий не входят. При первом звонке скрипт сам скачает две: голос Silero (38 МБ) и детектор речи Silero VAD (2 МБ). Для torch хватит сборки под процессор, видеокарта не нужна.
+The models are not in the repository. On the first call the script downloads two of them: the Silero voice (38 MB) and the Silero VAD speech detector (2 MB). A CPU build of torch is enough, no graphics card is needed.
 
-После этого в Claude Code появится команда `/claude-call`.
+After that the `/claude-call` command shows up in Claude Code.
 
-### Распознавание речи
+### Speech recognition
 
-Без настройки речь распознаёт Google. Он работает сразу, но не ставит знаков препинания, а сокращения и редкие слова подгоняет под словарные.
+Out of the box Google recognizes the speech. It works right away, but it adds no punctuation and bends abbreviations and rare words toward dictionary ones.
 
-Лучше подключить Whisper через Groq: он пишет то, что сказано, и сам расставляет знаки. Ключ бесплатный, получить его можно на [console.groq.com/keys](https://console.groq.com/keys). Сохрани его командой:
+Whisper through Groq is the better option: it writes what was actually said and punctuates it. The key is free, you can get one at [console.groq.com/keys](https://console.groq.com/keys). Save it with:
 
 ```
-python %USERPROFILE%\.claude\skills\claude-call\call.py key gsk_твой_ключ
+python %USERPROFILE%\.claude\skills\claude-call\call.py key gsk_your_key
 ```
 
-Ключ ляжет в `settings.json` рядом со скриптом, этот файл в репозиторий не попадает. Вместо команды можно задать переменную окружения `GROQ_API_KEY`. Если Groq не ответит, реплику распознает Google.
+The key goes into `settings.json` next to the script, and that file is not tracked by git. You can set the `GROQ_API_KEY` environment variable instead. If Groq does not answer, Google recognizes the phrase.
 
-## Как это устроено
+## How it works
 
-На время звонка запускается один фоновый процесс. В нём живут окно, микрофон, детектор речи, диктор и маленький HTTP-сервер на `127.0.0.1:8765`. Claude управляет звонком командами `call.py`, они ходят в этот сервер с одноразовым токеном:
+One background process runs for the length of the call. It holds the window, the microphone, the speech detector, the voice and a small HTTP server on `127.0.0.1:8765`. Claude drives the call with `call.py` commands, which talk to that server using a one-time token:
 
-| Команда | Что делает |
+| Command | What it does |
 |---|---|
-| `call [--from-user] [привет]` | звонит, здоровается и возвращает первую реплику |
-| `say [--no-wait] [--important]` | озвучивает текст и ждёт ответную реплику |
-| `listen [--wait=секунды]` | ждёт реплику, ничего не говоря; с `--wait=0` сразу отдаёт то, что уже сказано |
-| `mute [on\|off]` | выключает или включает микрофон пользователя |
-| `hangup` | кладёт трубку, когда договорят оба |
-| `key <ключ>` | сохраняет ключ Groq |
+| `call [--from-user] [greeting]` | places the call, says the greeting and returns the first phrase |
+| `say [--no-wait] [--important]` | speaks the text and waits for the reply |
+| `listen [--wait=seconds]` | waits for a phrase without saying anything; with `--wait=0` it returns what has already been said |
+| `mute [on\|off]` | turns the user's microphone off or on |
+| `hangup` | hangs up once both sides have finished talking |
+| `key <key>` | saves the Groq key |
 
-Пока Claude занят долгой задачей, он запускает её в фоне и продолжает слушать короткими отрезками через `listen --wait`, поэтому с ним можно говорить посреди работы.
+While Claude is busy with a long task it runs the task in the background and keeps listening in short stretches through `listen --wait`, so you can talk to it in the middle of the work.
 
-После звонка процесс гасится сам и память освобождается. Во время звонка он занимает около 350 МБ с быстрым голосом и около 60 МБ с системным.
+After the call the process exits on its own and the memory is freed. During a call it takes about 350 MB with the neural voice and about 60 MB with the system one.
 
-Распознавание идёт в облаке (Whisper через Groq или Google), локально ничего не считается. Диктор и детектор речи работают на процессоре.
+Recognition happens in the cloud (Whisper through Groq, or Google), nothing is computed locally for it. The voice and the speech detector run on the CPU.
 
-| Файл | Что в нём |
+| File | What is in it |
 |---|---|
-| `call.py` | команды, сервер, микрофон, распознавание, диктор |
-| `window.py` | окно; значки рисуются из контуров, записанных прямо в коде |
-| `SKILL.md` | инструкция для Claude, как вести звонок |
-| `test_call.py` | проверка сервера и расстановки запятых без окна и звука |
+| `call.py` | commands, server, microphone, recognition, voice |
+| `window.py` | the window; icons are drawn from outlines stored in the code |
+| `SKILL.md` | instructions for Claude on how to run a call, in Russian |
+| `test_call.py` | checks for the server and the comma placement, without a window or sound |
 
-## Настройки
+## Settings
 
-Константы в начале `call.py`:
+Constants at the top of `call.py`:
 
-| Имя | Что меняет |
+| Name | What it changes |
 |---|---|
-| `FAST_VOICE` | голос быстрого диктора: `aidar`, `eugene`, `baya`, `kseniya`, `xenia` |
-| `LIGHT_VOICE` | слово из названия системного голоса Windows |
-| `SILENCE_ENDING_UTTERANCE` | сколько секунд тишины считать концом реплики |
-| `SPEECH_STARTING_UTTERANCE` | сколько секунд речи подряд нужно, чтобы микрофон её подхватил |
-| `SPEECH_PROBABILITY` | с какой уверенности детектор считает звук речью |
-| `CONFIDENT_SPEECH_BLOCKS` | сколько блоков уверенной речи нужно, чтобы реплика ушла на распознавание и перебила диктора |
-| `ECHO_MARGIN` | во сколько раз голос должен быть громче эха диктора, чтобы его перебить |
-| `COMMA_PAUSE_RANGE` | границы паузы, которая даёт запятую |
-| `HEARD_CHIME` | звук «услышал, думаю» из `C:\Windows\Media` |
-| `DUCKED_VOLUME` | до какой доли глушить остальные программы при входящем вызове |
+| `FAST_VOICE` | the neural voice: `aidar`, `eugene`, `baya`, `kseniya`, `xenia` |
+| `LIGHT_VOICE` | a word from the name of the Windows system voice |
+| `SILENCE_ENDING_UTTERANCE` | how many seconds of silence end a phrase |
+| `SPEECH_STARTING_UTTERANCE` | how many seconds of continuous speech it takes for the microphone to pick it up |
+| `SPEECH_PROBABILITY` | how sure the detector must be to treat a sound as speech |
+| `CONFIDENT_SPEECH_BLOCKS` | how many blocks of confident speech it takes for a phrase to be recognized and to interrupt the voice |
+| `ECHO_MARGIN` | how far above the voice's own echo a sound must be to count as you |
+| `COMMA_PAUSE_RANGE` | the range of pause lengths that produce a comma |
+| `HEARD_CHIME` | the "heard you, thinking" sound from `C:\Windows\Media` |
+| `DUCKED_VOLUME` | how far other programs are turned down during an incoming call |
 
-## Ограничения
+## Limitations
 
-Настоящего эхоподавления нет. Микрофон сравнивает то, что слышит, с тем, что диктор произносит в этот момент, и запоминает их обычное соотношение: это и есть эхо из колонок. Речью он считает только то, что заметно это соотношение превышает. Обычного голоса хватает, чтобы перебить Claude, но первое слово при этом иногда срезается, а совсем тихая реплика поверх громкого диктора не пройдёт. С системным голосом Windows сравнивать не с чем, там работает простой порог громкости.
+There is no real echo cancellation. The microphone compares what it hears with what the voice is saying at that moment and remembers the strongest ratio over the last few seconds, which is the echo from the loudspeakers. Only a sound that stays above that ratio counts as speech. A normal voice is enough to interrupt Claude, but the first word sometimes gets clipped, a very quiet remark over a loud voice will not get through, and during the first second of a call, before the echo has been measured, you cannot interrupt at all. With the Windows system voice there is nothing to compare against, so a plain loudness threshold is used.
 
-Запасное распознавание работает через неофициальный адрес Google с общим ключом из библиотеки [SpeechRecognition](https://github.com/Uberi/speech_recognition). Лимиты там никто не обещал, а английские слова и сокращения он слышит плохо.
+The fallback recognition goes through an unofficial Google endpoint with the shared key from the [SpeechRecognition](https://github.com/Uberi/speech_recognition) library. Nobody promises any limits there, and it handles English words and abbreviations poorly.
 
-Без ключа Groq запятые стоят по паузам, а не по правилам. Место паузы в тексте оценивается по доле произнесённых букв, поэтому на растянутом слове запятая иногда съезжает на соседнее.
+Without a Groq key, commas follow pauses rather than grammar. The position of a pause in the text is estimated from the share of letters spoken, so on a drawn-out word the comma sometimes lands one word off.
 
-Быстрый диктор читает только русские буквы, цифры и латиницу он пропускает. Поэтому Claude пишет числа словами.
+The neural voice reads only Russian letters and skips digits and Latin script. That is why Claude writes numbers out in words.
 
-Скорость ответа упирается в саму модель: диктор и распознавание укладываются в секунду, остальное время Claude думает.
+Response time is bounded by the model itself: the voice and the recognition fit in about a second, and the rest is Claude thinking.
 
-## Проверка
+## Tests
 
 ```
 python test_call.py
 ```
 
-## Лицензия
+## License
 
-Код распространяется по лицензии MIT, текст в файле `LICENSE`.
+The code is released under the MIT license, see `LICENSE`.
 
-Значки трубки и микрофона взяты из набора [Material Symbols](https://github.com/google/material-design-icons) от Google, лицензия Apache 2.0.
+The phone and microphone icons come from Google's [Material Symbols](https://github.com/google/material-design-icons), licensed under Apache 2.0.
 
-Модели Silero скачиваются отдельно и живут по своим лицензиям: [silero-models](https://github.com/snakers4/silero-models) и [silero-vad](https://github.com/snakers4/silero-vad).
+The Silero models are downloaded separately and come under their own licenses: [silero-models](https://github.com/snakers4/silero-models) and [silero-vad](https://github.com/snakers4/silero-vad).

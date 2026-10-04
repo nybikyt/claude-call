@@ -50,12 +50,13 @@ CONFIDENT_SPEECH_PROBABILITY = 0.7
 CONFIDENT_SPEECH_BLOCKS = 4
 LONGEST_UTTERANCE = 30
 ECHO_TAIL = 0.3
-ECHO_MEMORY = 3
-ECHO_LEARNING_BLOCKS = 15
+ECHO_MEMORY = 8
+ECHO_LEARNING_BLOCKS = 25
 ECHO_DELAY_BLOCKS = 12
 ECHO_LEAD_IN_BLOCKS = 3
 ECHO_REFERENCE_FLOOR = 0.005
-ECHO_MARGIN = 1.6
+ECHO_PERCENTILE = 95
+ECHO_MARGIN = 1.5
 COMMA_PAUSE_RANGE = (0.1, 0.25)
 CONJUNCTIONS = {'что', 'чтобы', 'а', 'но', 'если', 'когда', 'потому', 'поэтому', 'хотя', 'пока', 'зато',
                 'однако', 'где', 'который', 'которая', 'которое', 'которые'}
@@ -376,7 +377,7 @@ def listener():
     lead_in = collections.deque(maxlen=16)
     recent_pauses = collections.deque(maxlen=40)
     echo_strengths = collections.deque(maxlen=round(ECHO_MEMORY / BLOCK_SECONDS))
-    recent_strengths = collections.deque(maxlen=4)
+    recent_strengths = collections.deque(maxlen=3)
     echo_without_reference = False
     echo_until = 0
 
@@ -423,36 +424,42 @@ def listener():
         context = samples[:, -64:]
         is_speech = probability[0, 0] > SPEECH_PROBABILITY
         level = float(np.abs(samples[0, 64:]).mean())
+        louder_than_echo = True
+        if hearing_echo:
+            # ponytail: настоящего эхоподавления нет. Микрофон сравнивает громкость с тем, что
+            # диктор произносит в этот момент, и запоминает самое сильное соотношение за последние
+            # секунды - это эхо из колонок. Речью считается только то, что устойчиво его превышает.
+            # Тихий голос поверх громкого диктора не пройдёт, а в первую секунду звонка, пока эхо
+            # ещё не измерено, перебить нельзя. Полноценный AEC нужен, если этого станет мало.
+            announcer_level = announcer_loudness(time.monotonic())
+            if (announcer_level is None) != echo_without_reference:
+                echo_without_reference = announcer_level is None
+                echo_strengths.clear()
+            strength = level if announcer_level is None else level / (announcer_level + ECHO_REFERENCE_FLOOR)
+            recent_strengths.append(strength)
+            usual_echo = np.percentile(echo_strengths, ECHO_PERCENTILE) if echo_strengths else 0
+            louder_than_echo = (len(echo_strengths) >= ECHO_LEARNING_BLOCKS
+                                and statistics.median(recent_strengths) > ECHO_MARGIN * usual_echo)
+            if utterance is None and not louder_than_echo:
+                echo_strengths.append(strength)
+                while len(lead_in) > ECHO_LEAD_IN_BLOCKS:
+                    lead_in.popleft()
         if utterance is None:
-            if hearing_echo:
-                # ponytail: настоящего эхоподавления нет. Микрофон сравнивает громкость с тем, что
-                # диктор произносит в этот момент, и запоминает обычное соотношение - это эхо из
-                # колонок. Речью считается только то, что заметно его превышает. Тихий голос поверх
-                # громкого диктора не пройдёт; полноценный AEC нужен, если этого станет мало.
-                announcer_level = announcer_loudness(time.monotonic())
-                if (announcer_level is None) != echo_without_reference:
-                    echo_without_reference = announcer_level is None
-                    echo_strengths.clear()
-                strength = level if announcer_level is None else level / (announcer_level + ECHO_REFERENCE_FLOOR)
-                recent_strengths.append(strength)
-                louder_than_echo = (len(echo_strengths) >= ECHO_LEARNING_BLOCKS
-                                    and max(recent_strengths) > ECHO_MARGIN * np.percentile(echo_strengths, 90))
-                if not louder_than_echo:
-                    echo_strengths.append(strength)
-                    while len(lead_in) > ECHO_LEAD_IN_BLOCKS:
-                        lead_in.popleft()
-                is_speech = is_speech and louder_than_echo
+            is_speech = is_speech and louder_than_echo
             lead_in.append(block)
             speech_time = speech_time + BLOCK_SECONDS if is_speech else 0
             if speech_time >= SPEECH_STARTING_UTTERANCE:
                 utterance, silence_time, pauses = list(lead_in), 0, []
                 spoken_blocks, hush_time, loudness = round(SPEECH_STARTING_UTTERANCE / BLOCK_SECONDS), 0, level
                 confident_blocks = 0
+                if hearing_echo:
+                    print(f'голос поверх диктора: сила {statistics.median(recent_strengths):.2f}, '
+                          f'обычное эхо {usual_echo:.2f}', file=sys.stderr, flush=True)
                 user_speaking.set()
                 view['status'] = 'слушаю…'
             continue
         utterance.append(block)
-        if probability[0, 0] > CONFIDENT_SPEECH_PROBABILITY:
+        if probability[0, 0] > CONFIDENT_SPEECH_PROBABILITY and louder_than_echo:
             confident_blocks += 1
             if confident_blocks == CONFIDENT_SPEECH_BLOCKS and announcer_speaking.is_set():
                 announcer_interrupted.set()
