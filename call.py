@@ -329,7 +329,8 @@ def speaker():
                                     sample_rate=PLAYBACK_RATE)
         samples = audio.numpy()
         blocks = len(samples) // PLAYBACK_BLOCK_SAMPLES
-        envelope = np.abs(samples[:blocks * PLAYBACK_BLOCK_SAMPLES]).reshape(blocks, PLAYBACK_BLOCK_SAMPLES).mean(axis=1)
+        loudness_by_block = np.abs(samples[:blocks * PLAYBACK_BLOCK_SAMPLES]).reshape(blocks, PLAYBACK_BLOCK_SAMPLES)
+        envelope = loudness_by_block.mean(axis=1)
         played_sentences.append((time.monotonic(), envelope))
         sd.play(samples, PLAYBACK_RATE)
         while sd.get_stream().active and not stopped():
