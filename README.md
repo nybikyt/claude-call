@@ -4,11 +4,11 @@ Voice calls with Claude Code. Type `/claude-call`, a small window opens, you tal
 
 This is an unofficial project. Claude and the Claude logo belong to Anthropic, and the author is not affiliated with the company.
 
-It runs on Windows 10 and 11. The window, the voice and the speech recognition are set up for Russian.
+It runs on Windows 10 and 11. Calls are in English by default; an EN / RU switch in the window changes the labels, the speech recognition and the voice together.
 
 ## What a call is like
 
-The window shows who is calling whom: "Звоню Claude…" when you started the call, and "Claude звонит Вам" with a ringtone when Claude did. While an incoming call is ringing, other programs play quieter, and their volume comes back once you answer.
+The window shows who is calling whom: "Calling Claude…" when you started the call, and "Claude is calling you" with a ringtone when Claude did. While an incoming call is ringing, other programs play quieter, and their volume comes back once you answer.
 
 The microphone listens all the time, so there is nothing to hold down. A speech detector tells a voice apart from keyboard clatter and other noise, so a random sound will not cut Claude off. A phrase counts as finished after 0.8 seconds of silence.
 
@@ -16,7 +16,9 @@ Start talking over the voice and it stops, and Claude gets your words marked as 
 
 Claude cannot hang up while you are still talking. The command waits for the end of your phrase and hands your words back to it.
 
-The window has two switches. "Быстрый голос" picks the voice: the neural one sounds nicer but holds about 300 MB of memory, while the Windows system voice takes almost none. "Перебивать голосом" can be turned off if the voice keeps cutting itself off through loudspeakers, and then the microphone stays silent while Claude speaks.
+The window has two switches. "Fast voice" picks the voice: the neural one sounds nicer but holds about 300 MB of memory, while the Windows system voice takes almost none. "Interrupt by voice" can be turned off if the voice keeps cutting itself off through loudspeakers, and then the microphone stays silent while Claude speaks.
+
+Drag a window edge to make it smaller or larger; everything inside scales with it and the size is remembered. EN / RU in the top right corner switches the call language, and Claude is told to switch with you.
 
 ## Installation
 
@@ -27,7 +29,7 @@ git clone https://github.com/nybikyt/claude-call %USERPROFILE%\.claude\skills\cl
 python -m pip install -r %USERPROFILE%\.claude\skills\claude-call\requirements.txt
 ```
 
-The models are not in the repository. On the first call the script downloads two of them: the Silero voice (38 MB) and the Silero VAD speech detector (2 MB). A CPU build of torch is enough, no graphics card is needed.
+The models are not in the repository. On the first call the script downloads two of them: the Silero voice for the chosen language (57 MB for English, 38 MB for Russian) and the Silero VAD speech detector (2 MB). A CPU build of torch is enough, no graphics card is needed.
 
 After that the `/claude-call` command shows up in Claude Code.
 
@@ -66,7 +68,7 @@ Recognition happens in the cloud (Whisper through Groq, or Google), nothing is c
 |---|---|
 | `call.py` | commands, server, microphone, recognition, voice |
 | `window.py` | the window; icons are drawn from outlines stored in the code |
-| `SKILL.md` | instructions for Claude on how to run a call, in Russian |
+| `SKILL.md` | instructions for Claude on how to run a call |
 | `test_call.py` | checks for the server and the comma placement, without a window or sound |
 
 ## Settings
@@ -75,8 +77,8 @@ Constants at the top of `call.py`:
 
 | Name | What it changes |
 |---|---|
-| `FAST_VOICE` | the neural voice: `aidar`, `eugene`, `baya`, `kseniya`, `xenia` |
-| `LIGHT_VOICE` | a word from the name of the Windows system voice |
+| `DEFAULT_LANGUAGE` | the call language until the user picks another one in the window |
+| `LANGUAGES` | per language: recognition locale, the neural voice file and speaker (`en_0` to `en_117` for English; `aidar`, `eugene`, `baya`, `kseniya`, `xenia` for Russian), the preferred Windows system voice |
 | `SILENCE_ENDING_UTTERANCE` | how many seconds of silence end a phrase |
 | `SPEECH_STARTING_UTTERANCE` | how many seconds of continuous speech it takes for the microphone to pick it up |
 | `SPEECH_PROBABILITY` | how sure the detector must be to treat a sound as speech |
@@ -94,7 +96,7 @@ The fallback recognition goes through an unofficial Google endpoint with the sha
 
 Without a Groq key, commas follow pauses rather than grammar. The position of a pause in the text is estimated from the share of letters spoken, so on a drawn-out word the comma sometimes lands one word off.
 
-The neural voice reads only Russian letters and skips digits and Latin script. That is why Claude writes numbers out in words.
+The neural voice reads only the letters of its own language and skips digits and the other alphabet. That is why Claude writes numbers out in words.
 
 Response time is bounded by the model itself: the voice and the recognition fit in about a second, and the rest is Claude thinking.
 

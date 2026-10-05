@@ -1,4 +1,4 @@
-voice.pt
+voice_*.pt
 vad.onnx
 *.part
 settings.json

@@ -1,11 +1,11 @@
-"""Голосовой звонок с Claude Code.
+"""Voice calls with Claude Code.
 
-  call [--from-user] [привет]    позвонить, поздороваться и дождаться первой реплики
-  say [--no-wait] [--important]  озвучить текст (stdin или аргументы) и дождаться реплики
-  listen [--wait=секунды]        дождаться реплики, ничего не говоря; --wait=0 - только уже сказанное
-  mute [on|off]                  выключить или включить микрофон пользователя
-  hangup                         положить трубку, когда договорят и диктор, и пользователь
-  key <ключ Groq>                сохранить ключ: с ним распознаёт Whisper, без него Google
+  call [--from-user] [greeting]  place the call, say the greeting and wait for the first phrase
+  say [--no-wait] [--important]  speak the text (stdin or arguments) and wait for the reply
+  listen [--wait=seconds]        wait for a phrase without speaking; --wait=0 returns only what was already said
+  mute [on|off]                  turn the user's microphone off or on
+  hangup                         hang up once both the voice and the user have finished
+  key <Groq key>                 save the key: Whisper recognizes speech with it, Google without it
 """
 import collections
 import html
@@ -34,15 +34,36 @@ TOKEN_FILE = HERE / '.token'
 SETTINGS_FILE = HERE / 'settings.json'
 DUCKED_VOLUMES_FILE = HERE / 'ducked.json'
 LOG_FILE = Path(tempfile.gettempdir()) / 'claude-call.log'
-MODEL_URLS = {
-    'voice.pt': 'https://models.silero.ai/models/tts/ru/v4_ru.pt',
-    'vad.onnx': 'https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx',
-}
 PORT = 8765
 
-FAST_VOICE = 'eugene'
-LIGHT_VOICE = 'Pavel'
-RECOGNITION_LANGUAGE = 'ru-RU'
+DEFAULT_LANGUAGE = 'en'
+LANGUAGES = {
+    'en': {
+        'recognition': 'en-US',
+        'voice_file': 'voice_en.pt',
+        'voice_url': 'https://models.silero.ai/models/tts/en/v3_en.pt',
+        'fast_voice': 'en_0',
+        'system_voice': ('409', 'David'),
+        'conjunctions': {'that', 'but', 'because', 'if', 'when', 'although', 'while', 'which', 'so', 'unless'},
+        'whisper_silence_phrases': {'thanks for watching', 'thank you for watching'},
+    },
+    'ru': {
+        'recognition': 'ru-RU',
+        'voice_file': 'voice_ru.pt',
+        'voice_url': 'https://models.silero.ai/models/tts/ru/v4_ru.pt',
+        'fast_voice': 'eugene',
+        'system_voice': ('419', 'Pavel'),
+        'conjunctions': {'что', 'чтобы', 'а', 'но', 'если', 'когда', 'потому', 'поэтому', 'хотя', 'пока', 'зато',
+                         'однако', 'где', 'который', 'которая', 'которое', 'которые'},
+        'whisper_silence_phrases': {'продолжение следует', 'спасибо за просмотр', 'субтитры сделал dimatorzok',
+                                    'субтитры создавал dimatorzok',
+                                    'редактор субтитров а.семкин корректор а.егорова'},
+    },
+}
+DETECTOR_FILE = 'vad.onnx'
+DETECTOR_URL = 'https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx'
+SYSTEM_VOICES_KEY = 'HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Speech_OneCore/Voices'.replace('/', os.sep)
+
 SILENCE_ENDING_UTTERANCE = 0.8
 SPEECH_STARTING_UTTERANCE = 0.16
 SPEECH_PROBABILITY = 0.35
@@ -58,8 +79,6 @@ ECHO_REFERENCE_FLOOR = 0.005
 ECHO_PERCENTILE = 95
 ECHO_MARGIN = 1.5
 COMMA_PAUSE_RANGE = (0.1, 0.25)
-CONJUNCTIONS = {'что', 'чтобы', 'а', 'но', 'если', 'когда', 'потому', 'поэтому', 'хотя', 'пока', 'зато',
-                'однако', 'где', 'который', 'которая', 'которое', 'которые'}
 HEARD_CHIME = 'Speech Off.wav'
 INCOMING_RINGTONE = 'Ring05.wav'
 DUCKED_VOLUME = 0.2
@@ -75,12 +94,10 @@ BLOCK_SAMPLES = 512
 BLOCK_SECONDS = BLOCK_SAMPLES / SAMPLE_RATE
 PLAYBACK_RATE = 48000
 PLAYBACK_BLOCK_SAMPLES = round(PLAYBACK_RATE * BLOCK_SECONDS)
-SPEECH_API_URL = ('https://www.google.com/speech-api/v2/recognize?client=chromium&pFilter=0'
-                  f'&lang={RECOGNITION_LANGUAGE}&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw')
+GOOGLE_SPEECH_URL = ('https://www.google.com/speech-api/v2/recognize?client=chromium&pFilter=0'
+                     '&key=AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqWBgw&lang=')
 WHISPER_API_URL = 'https://api.groq.com/openai/v1/audio/transcriptions'
 WHISPER_MODEL = 'whisper-large-v3-turbo'
-WHISPER_SILENCE_PHRASES = {'продолжение следует', 'спасибо за просмотр', 'субтитры сделал dimatorzok',
-                           'субтитры создавал dimatorzok', 'редактор субтитров а.семкин корректор а.егорова'}
 
 speech_queue = queue.Queue()
 played_sentences = collections.deque(maxlen=3)
@@ -93,15 +110,38 @@ user_speaking = threading.Event()
 voice_ready = threading.Event()
 call_state = 'ringing'
 view = {'status': '', 'live': '', 'muted': False, 'locked': False}
-settings = {'barge_in': True, 'fast': True}
+settings = {'barge_in': True, 'fast': True, 'language': DEFAULT_LANGUAGE, 'zoom': 1.0}
 if SETTINGS_FILE.exists():
     settings.update(json.loads(SETTINGS_FILE.read_text()))
+if settings['language'] not in LANGUAGES:
+    settings['language'] = DEFAULT_LANGUAGE
 start_time = last_command_time = time.monotonic()
 token = ''
 
 
-def save_settings():
-    SETTINGS_FILE.write_text(json.dumps(settings))
+def save_setting(name, value):
+    settings[name] = value
+    stored = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
+    stored[name] = value
+    SETTINGS_FILE.write_text(json.dumps(stored))
+
+
+def language():
+    return LANGUAGES[settings['language']]
+
+
+def set_language(code):
+    save_setting('language', code)
+    heard_events.put({'language': code})
+
+
+def download_model(name, url):
+    path = HERE / name
+    if not path.exists():
+        print(f'[downloading {name}]', flush=True)
+        partial = path.with_suffix('.part')
+        urllib.request.urlretrieve(url, partial)
+        partial.replace(path)
 
 
 def play_system_sound(name, loop=False):
@@ -149,7 +189,7 @@ def answer():
     global call_state
     if call_state == 'ringing':
         call_state = 'talking'
-        view['status'] = 'слушаю'
+        view['status'] = 'listening'
         stop_ringing()
         ringing_finished.set()
 
@@ -178,7 +218,7 @@ def wait_for_answer(body):
     ringing_finished.wait(RING_TIMEOUT)
     if call_state != 'talking':
         finish()
-    return {'answered': call_state == 'talking'}
+    return {'answered': call_state == 'talking', 'language': settings['language']}
 
 
 def say(body):
@@ -271,21 +311,27 @@ def speaker():
     import numpy as np
     import sounddevice as sd
 
+    fast_voices, system_voices = {}, {}
+
     def stopped():
         return announcer_interrupted.is_set() or call_state != 'talking'
 
-    def load_fast_voice():
-        import torch
-        torch.set_num_threads(4)
-        model = torch.package.PackageImporter(str(HERE / 'voice.pt')).load_pickle('tts_models', 'model')
-        model.to(torch.device('cpu'))
-        return torch, model
+    def fast_voice(code):
+        if code not in fast_voices:
+            import torch
+            torch.set_num_threads(4)
+            download_model(LANGUAGES[code]['voice_file'], LANGUAGES[code]['voice_url'])
+            package = torch.package.PackageImporter(str(HERE / LANGUAGES[code]['voice_file']))
+            model = package.load_pickle('tts_models', 'model')
+            model.to(torch.device('cpu'))
+            fast_voices[code] = torch, model
+        return fast_voices[code]
 
-    def say_with_fast_voice(sentence):
-        torch, model = fast_voice
+    def say_with_fast_voice(sentence, code):
+        torch, model = fast_voice(code)
         marked = html.escape(sentence).replace(',', ',<break time="200ms"/>')
         with torch.jit.optimized_execution(False), torch.inference_mode():
-            audio = model.apply_tts(ssml_text=f'<speak>{marked}</speak>', speaker=FAST_VOICE,
+            audio = model.apply_tts(ssml_text=f'<speak>{marked}</speak>', speaker=LANGUAGES[code]['fast_voice'],
                                     sample_rate=PLAYBACK_RATE)
         samples = audio.numpy()
         blocks = len(samples) // PLAYBACK_BLOCK_SAMPLES
@@ -296,32 +342,39 @@ def speaker():
             time.sleep(0.02)
         sd.stop()
 
-    def load_light_voice():
-        import comtypes.client
-        comtypes.CoInitialize()
-        voice = comtypes.client.CreateObject('SAPI.SpVoice', dynamic=True)
-        category = comtypes.client.CreateObject('SAPI.SpObjectTokenCategory', dynamic=True)
-        category.SetId('HKEY_LOCAL_MACHINE/SOFTWARE/Microsoft/Speech_OneCore/Voices'.replace('/', os.sep), False)
-        voices = category.EnumerateTokens()
-        for index in range(voices.Count):
-            if LIGHT_VOICE in voices.Item(index).GetDescription():
-                voice.Voice = voices.Item(index)
-        voice.Rate = 2
-        return voice
+    def system_voice(code):
+        if code not in system_voices:
+            import comtypes.client
+            comtypes.CoInitialize()
+            voice = comtypes.client.CreateObject('SAPI.SpVoice', dynamic=True)
+            modern_voices = comtypes.client.CreateObject('SAPI.SpObjectTokenCategory', dynamic=True)
+            modern_voices.SetId(SYSTEM_VOICES_KEY, False)
+            installed = [voices.Item(index)
+                         for voices in (modern_voices.EnumerateTokens(), voice.GetVoices())
+                         for index in range(voices.Count)]
+            language_id, preferred_name = LANGUAGES[code]['system_voice']
+            in_language = [candidate for candidate in installed
+                           if language_id in candidate.GetAttribute('Language').split(';')]
+            preferred = [candidate for candidate in in_language if preferred_name in candidate.GetDescription()]
+            if in_language:
+                voice.Voice = (preferred or in_language)[0]
+            voice.Rate = 2
+            system_voices[code] = voice
+        return system_voices[code]
 
-    def say_with_light_voice(sentence):
+    def say_with_system_voice(sentence, code):
         speak_async, purge = 1, 2
+        voice = system_voice(code)
         played_sentences.append((time.monotonic(), None))
-        light_voice.Speak(sentence, speak_async)
-        while not light_voice.WaitUntilDone(20) and not stopped():
+        voice.Speak(sentence, speak_async)
+        while not voice.WaitUntilDone(20) and not stopped():
             pass
-        light_voice.Speak('', speak_async | purge)
+        voice.Speak('', speak_async | purge)
 
-    fast_voice = light_voice = None
     if settings['fast']:
-        fast_voice = load_fast_voice()
+        fast_voice(settings['language'])
     else:
-        light_voice = load_light_voice()
+        system_voice(settings['language'])
     voice_ready.set()
 
     while True:
@@ -338,15 +391,13 @@ def speaker():
             for sentence in sentences:
                 if stopped():
                     break
-                view['status'], view['live'] = 'Claude говорит…', text
+                view['status'], view['live'] = 'speaking', text
                 if settings['fast']:
-                    fast_voice = fast_voice or load_fast_voice()
-                    say_with_fast_voice(sentence)
+                    say_with_fast_voice(sentence, settings['language'])
                 else:
-                    light_voice = light_voice or load_light_voice()
-                    say_with_light_voice(sentence)
+                    say_with_system_voice(sentence, settings['language'])
         except Exception as error:
-            heard_events.put({'error': f'диктор не сработал: {error!r}'})
+            heard_events.put({'error': f'the voice failed: {error!r}'})
         announcer_speaking.clear()
         view['locked'] = False
         speech_queue.task_done()
@@ -355,7 +406,7 @@ def speaker():
                 speech_queue.get_nowait()
                 speech_queue.task_done()
         elif speech_queue.empty():
-            view['status'] = 'слушаю'
+            view['status'] = 'listening'
 
 
 def listener():
@@ -365,7 +416,7 @@ def listener():
 
     options = onnxruntime.SessionOptions()
     options.intra_op_num_threads = options.inter_op_num_threads = 1
-    detector = onnxruntime.InferenceSession(str(HERE / 'vad.onnx'), options, providers=['CPUExecutionProvider'])
+    detector = onnxruntime.InferenceSession(str(HERE / DETECTOR_FILE), options, providers=['CPUExecutionProvider'])
     rate = np.array(SAMPLE_RATE, np.int64)
     blank = np.zeros((2, 1, 128), np.float32), np.zeros((1, 64), np.float32)
     memory, context = blank
@@ -380,6 +431,8 @@ def listener():
     recent_strengths = collections.deque(maxlen=3)
     echo_without_reference = False
     echo_until = 0
+    utterance, speech_time, silence_time, pauses = None, 0, 0, []
+    spoken_blocks, confident_blocks, hush_time, loudness = 0, 0, 0, 0
 
     def announcer_loudness(now):
         loudest = 0.0
@@ -391,18 +444,16 @@ def listener():
             if len(heard_now):
                 loudest = max(loudest, float(heard_now.max()))
         return loudest
-    utterance, speech_time, silence_time, pauses = None, 0, 0, []
-    spoken_blocks, confident_blocks, hush_time, loudness = 0, 0, 0, 0
 
     def send_utterance():
         if confident_blocks < CONFIDENT_SPEECH_BLOCKS:
-            view['status'] = 'слушаю'
+            view['status'] = 'listening'
             return
         comma_positions = [place / spoken_blocks for place in comma_pauses(pauses, recent_pauses)]
         audio = b''.join(part.tobytes() for part in utterance)
         recorded_utterances.put((audio, comma_positions, announcer_interrupted.is_set()))
         announcer_interrupted.clear()
-        view['status'] = 'распознаю…'
+        view['status'] = 'recognizing'
 
     while True:
         block = blocks.get()
@@ -426,11 +477,12 @@ def listener():
         level = float(np.abs(samples[0, 64:]).mean())
         louder_than_echo = True
         if hearing_echo:
-            # ponytail: настоящего эхоподавления нет. Микрофон сравнивает громкость с тем, что
-            # диктор произносит в этот момент, и запоминает самое сильное соотношение за последние
-            # секунды - это эхо из колонок. Речью считается только то, что устойчиво его превышает.
-            # Тихий голос поверх громкого диктора не пройдёт, а в первую секунду звонка, пока эхо
-            # ещё не измерено, перебить нельзя. Полноценный AEC нужен, если этого станет мало.
+            # ponytail: there is no real echo cancellation. The microphone compares its level with what
+            # the voice is saying right now and remembers the usual ratio over the last seconds, which
+            # is the echo from the loudspeakers. Only a sound that stays above it counts as speech.
+            # A quiet remark over a loud voice will not pass, and for the first second of a call,
+            # before the echo has been measured, the voice cannot be interrupted. Use a proper AEC
+            # if that stops being enough.
             announcer_level = announcer_loudness(time.monotonic())
             if (announcer_level is None) != echo_without_reference:
                 echo_without_reference = announcer_level is None
@@ -453,10 +505,10 @@ def listener():
                 spoken_blocks, hush_time, loudness = round(SPEECH_STARTING_UTTERANCE / BLOCK_SECONDS), 0, level
                 confident_blocks = 0
                 if hearing_echo:
-                    print(f'голос поверх диктора: сила {statistics.median(recent_strengths):.2f}, '
-                          f'обычное эхо {usual_echo:.2f}', file=sys.stderr, flush=True)
+                    print(f'voice over the announcer: strength {statistics.median(recent_strengths):.2f}, '
+                          f'usual echo {usual_echo:.2f}', file=sys.stderr, flush=True)
                 user_speaking.set()
-                view['status'] = 'слушаю…'
+                view['status'] = 'hearing'
             continue
         utterance.append(block)
         if probability[0, 0] > CONFIDENT_SPEECH_PROBABILITY and louder_than_echo:
@@ -496,7 +548,7 @@ def recognize_with_whisper(audio, key):
         wav.setframerate(SAMPLE_RATE)
         wav.writeframes(audio)
     boundary = secrets.token_hex(16)
-    fields = {'model': WHISPER_MODEL, 'language': RECOGNITION_LANGUAGE[:2], 'response_format': 'json',
+    fields = {'model': WHISPER_MODEL, 'language': settings['language'], 'response_format': 'json',
               'temperature': '0'}
     parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
              for name, value in fields.items()]
@@ -508,17 +560,19 @@ def recognize_with_whisper(audio, key):
     with urllib.request.urlopen(urllib.request.Request(WHISPER_API_URL, b''.join(parts), headers),
                                 timeout=15) as response:
         text = json.load(response)['text'].strip()
-    # ponytail: на тишине и шуме Whisper уверенно выдаёт одни и те же фразы из субтитров, а его
-    # оценки уверенности их не отличают от речи. Шум отсекает детектор речи, а этот список -
-    # страховка на случай, если шум всё же прошёл.
-    return '' if text.strip(' .…!').lower() in WHISPER_SILENCE_PHRASES else text
+    # ponytail: on silence and noise Whisper confidently returns the same subtitle phrases, and its
+    # own confidence scores do not tell them from speech. The speech detector keeps noise out, and
+    # this list is the backstop for noise that slips through anyway.
+    return '' if text.strip(' .…!').lower() in language()['whisper_silence_phrases'] else text
 
 
 def recognize_with_google(audio):
-    # ponytail: неофициальный адрес Google с общим ключом из библиотеки SpeechRecognition. Работает без
-    # регистрации, но лимиты не гарантированы, знаков препинания нет, а редкие слова и сокращения он
-    # подгоняет под словарные. Поэтому с ключом Groq распознаёт Whisper, а это запасной путь.
-    request = urllib.request.Request(SPEECH_API_URL, audio, {'Content-Type': f'audio/l16; rate={SAMPLE_RATE}'})
+    # ponytail: an unofficial Google endpoint with the shared key from the SpeechRecognition library.
+    # It needs no sign-up, but nobody guarantees its limits, it adds no punctuation and it bends rare
+    # words and abbreviations toward dictionary ones. With a Groq key Whisper does the recognizing
+    # and this is only the fallback.
+    request = urllib.request.Request(GOOGLE_SPEECH_URL + language()['recognition'], audio,
+                                     {'Content-Type': f'audio/l16; rate={SAMPLE_RATE}'})
     with urllib.request.urlopen(request, timeout=15) as response:
         results = [result for line in response.read().decode().splitlines()
                    for result in json.loads(line or '{}').get('result', [])]
@@ -532,21 +586,21 @@ def transcribe(audio, comma_positions):
         try:
             return recognize_with_whisper(audio, key)
         except OSError as error:
-            print(f'Whisper не ответил ({error}), распознаю через Google', file=sys.stderr, flush=True)
+            print(f'Whisper did not answer ({error}), falling back to Google', file=sys.stderr, flush=True)
     return with_commas(recognize_with_google(audio), comma_positions)
 
 
 def with_commas(text, comma_positions):
-    # ponytail: запятая ставится по паузе, а её место в тексте ищется по доле произнесённых букв,
-    # будто речь идёт с ровной скоростью. На растянутом слове запятая может съехать на соседнее.
-    # Настоящая пунктуация появится вместе с распознавателем, который её отдаёт (Whisper).
+    # ponytail: a comma goes where the speaker paused, and its place in the text is found by the
+    # share of letters spoken, as if speech ran at an even pace. On a drawn-out word the comma can
+    # land one word off. Real punctuation comes with a recognizer that returns it (Whisper).
     words = text.split()
     letters_spoken = list(itertools.accumulate(map(len, words)))
 
     def word_before_comma(position):
         guess = min(range(len(words) - 1), key=lambda index: abs(letters_spoken[index] / letters_spoken[-1] - position))
         return next((index for index in (guess, guess - 1, guess + 1)
-                     if 0 <= index < len(words) - 1 and words[index + 1].lower() in CONJUNCTIONS), guess)
+                     if 0 <= index < len(words) - 1 and words[index + 1].lower() in language()['conjunctions']), guess)
 
     marked = {word_before_comma(position) for position in comma_positions if len(words) > 1}
     return ' '.join(word + ',' * (index in marked) for index, word in enumerate(words))
@@ -557,15 +611,15 @@ def recognizer():
         audio, comma_positions, interrupted = recorded_utterances.get()
         try:
             text = transcribe(audio, comma_positions)
-            print(f'реплика {len(audio) / 2 / SAMPLE_RATE:.1f} с: {text!r}', file=sys.stderr, flush=True)
+            print(f'utterance {len(audio) / 2 / SAMPLE_RATE:.1f} s: {text!r}', file=sys.stderr, flush=True)
             if text or interrupted:
                 heard_events.put({'text': text, 'interrupted': interrupted})
-                view['status'], view['live'] = 'Claude думает…', text
+                view['status'], view['live'] = 'thinking', text
                 play_system_sound(HEARD_CHIME)
             elif not announcer_speaking.is_set():
-                view['status'] = 'слушаю'
+                view['status'] = 'listening'
         except OSError as error:
-            heard_events.put({'error': f'распознавание не сработало: {error}'})
+            heard_events.put({'error': f'speech recognition failed: {error}'})
         recorded_utterances.task_done()
 
 
@@ -600,18 +654,10 @@ def request(path, body=None, timeout=REPLY_TIMEOUT + 30):
         return json.load(response)
 
 
-def download_missing_models():
-    for name, url in MODEL_URLS.items():
-        path = HERE / name
-        if not path.exists():
-            print(f'[скачиваю {name}]', flush=True)
-            partial = path.with_suffix('.part')
-            urllib.request.urlretrieve(url, partial)
-            partial.replace(path)
-
-
 def start_call(from_user, greeting):
-    download_missing_models()
+    download_model(DETECTOR_FILE, DETECTOR_URL)
+    if settings['fast']:
+        download_model(language()['voice_file'], language()['voice_url'])
     try:
         request('/hangup', {'now': True}, timeout=2)
     except OSError:
@@ -629,26 +675,29 @@ def start_call(from_user, greeting):
             break
         except OSError:
             if time.monotonic() > deadline:
-                sys.exit(f'[звонок не запустился, см. {LOG_FILE}]')
+                sys.exit(f'[the call did not start, see {LOG_FILE}]')
             time.sleep(0.2)
-    if not request('/answered')['answered']:
-        return print('[не взял трубку]')
-    print('[соединено]')
+    answered = request('/answered')
+    if not answered['answered']:
+        return print('[no answer]')
+    print(f"[connected, language: {answered['language']}]")
     print_events(request('/say', {'text': ''}))
 
 
 def print_events(result, waited=True):
     if result.get('unspoken'):
-        print('[не озвучено: пользователь заговорил раньше - ответь заново с учётом его слов]')
+        print('[not spoken: the user spoke first - answer again with their words in mind]')
     for event in result['events']:
         if event.get('hangup'):
-            print('[пользователь положил трубку]')
+            print('[the user hung up]')
         elif event.get('error'):
-            print(f"[ошибка: {event['error']}]")
+            print(f"[error: {event['error']}]")
+        elif event.get('language'):
+            print(f"[the user switched the call language to {event['language']} - speak it from now on]")
         else:
-            print(('[перебил] ' if event['interrupted'] else '') + (event['text'] or '(неразборчиво)'))
+            print(('[interrupted] ' if event['interrupted'] else '') + (event['text'] or '(unintelligible)'))
     if not result['events']:
-        print('[тишина]' if waited else '[озвучивается]')
+        print('[silence]' if waited else '[speaking]')
 
 
 def main():
@@ -670,22 +719,21 @@ def main():
             print_events(request('/say', body), wait)
         elif command == 'mute':
             muted = request('/mute', {'muted': words != 'off'})['muted']
-            print('[микрофон пользователя выключен]' if muted else '[микрофон пользователя включён]')
+            print("[the user's microphone is off]" if muted else "[the user's microphone is on]")
         elif command == 'key':
-            settings['groq_key'] = words
-            save_settings()
-            print('[ключ Groq сохранён, со следующего звонка распознаёт Whisper]')
+            save_setting('groq_key', words)
+            print('[Groq key saved, Whisper recognizes speech from the next call on]')
         elif command == 'hangup':
             result = request('/hangup')
             if result['hung_up']:
-                print('[звонок завершён]')
+                print('[call ended]')
             else:
-                print('[трубка не положена: пользователь ещё говорил - ответь ему]')
+                print('[not hung up: the user was still talking - answer them]')
                 print_events(result)
         else:
             print(__doc__)
     except OSError:
-        sys.exit('[звонок не активен - начни с call]')
+        sys.exit('[no active call - start with call]')
 
 
 if __name__ == '__main__':

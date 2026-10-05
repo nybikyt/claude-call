@@ -1,93 +1,96 @@
 ---
 name: claude-call
-description: Голосовой звонок между пользователем и Claude - маленькое окно, пользователь говорит голосом, его слова приходят в чат, ответы озвучивает диктор, диктора можно перебить. Использовать, когда пользователь вводит /claude-call или просит позвонить, созвониться, поговорить голосом. Claude может звонить и сам, без просьбы - когда закончил долгую задачу, когда нужно решение пользователя, чтобы продолжить, или случилось что-то важное.
+description: A voice call between the user and Claude - a small window, the user talks out loud, their words arrive in the chat, a voice reads the answers, and the voice can be interrupted. Use it when the user types /claude-call or asks to call, to talk by voice, to get on a call (in any language, for example "позвони", "зв", "созвонимся"). Claude may also call on its own, without being asked - when a long task is finished, when it needs the user's decision to continue, or when something important happened.
 allowed-tools: Bash(python ~/.claude/skills/claude-call/call.py *)
 ---
 
 # claude-call
 
-Звонок идёт через `call.py` рядом с этим файлом. Все команды запускай инструментом Bash, а не PowerShell: там не раскрывается `~` и ломается heredoc.
+The call runs through `call.py` next to this file. Run every command with the Bash tool, not PowerShell: there `~` is not expanded and heredocs break.
 
-## Скорость важнее всего
+## Speed comes first
 
-Пользователь ждёт каждый ответ в тишине и злится на паузы. Поэтому во время звонка:
+The user waits for every answer in silence and gets annoyed by pauses. So during a call:
 
-- реплика пришла - сразу одна команда `say`, без рассуждений и без текста в чат;
-- отвечай одной-двумя короткими фразами, подробности - только если просят;
-- нужно что-то сделать инструментами - сначала `say --no-wait` («секунду, смотрю»), потом работа, потом итог обычным `say`.
+- a phrase arrived - answer at once with a single `say`, with no deliberation and no text in the chat;
+- answer in one or two short sentences, details only when asked;
+- if you need tools - first `say --no-wait` ("one second, looking"), then the work, then the result with a normal `say`.
 
-## Как вести звонок
+## How to run a call
 
-1. Позвони (timeout 600000). Приветствие передай аргументом: оно прозвучит в момент соединения, а команда вернёт первую реплику пользователя.
-
-   ```bash
-   python ~/.claude/skills/claude-call/call.py call --from-user "Привет! Слушаю."
-   ```
-
-   Так - когда пользователь сам ввёл `/claude-call` или попросил созвониться: окно «Звоню Claude…», гудки, соединяет само через несколько секунд.
+1. Place the call (timeout 600000). Pass the greeting as an argument: it is spoken the moment the call connects, and the command returns the user's first phrase.
 
    ```bash
-   python ~/.claude/skills/claude-call/call.py call "Привет! Закончил сборку, есть вопрос."
+   python ~/.claude/skills/claude-call/call.py call --from-user "Hi! I'm listening."
    ```
 
-   Так - когда звонишь по своей инициативе: окно «Claude звонит Вам», рингтон, кнопки «Ответить» и «Сбросить», остальные программы на время вызова звучат тише.
+   Use this when the user typed `/claude-call` or asked for a call: the window says the user is calling Claude, a dial tone plays, and it connects by itself in a few seconds.
 
-   Команда вернёт `[соединено]` и первую реплику либо `[не взял трубку]`. Не взял - напиши в чат то, ради чего звонил, и остановись. При самом первом запуске она сначала скачает две модели, это около минуты.
+   ```bash
+   python ~/.claude/skills/claude-call/call.py call "Hi! The build is done and I have a question."
+   ```
 
-2. Дальше говори и слушай одной командой (timeout 600000). Текст передавай через heredoc с `'EOF'` в кавычках:
+   Use this when you call on your own initiative: the window says Claude is calling, a ringtone plays, there are Answer and Decline buttons, and other programs play quieter while it rings.
+
+   The command returns `[connected, language: en]` and the first phrase, or `[no answer]`. If there is no answer, write in the chat what you were calling about and stop. On the very first run it downloads two models first, which takes about a minute.
+
+2. The language in `[connected, language: ...]` is the language of the call: the window, the recognition and the voice are all set to it. Speak that language, greeting included. If you do not know it before calling, greet in the language the user writes in. When `[the user switched the call language to ...]` arrives, switch with it.
+
+3. From then on, speak and listen with one command (timeout 600000). Pass the text through a heredoc with `'EOF'` quoted:
 
    ```bash
    python ~/.claude/skills/claude-call/call.py say <<'EOF'
-   Да, сейчас сделаю.
+   Sure, doing it now.
    EOF
    ```
 
-   Команда озвучит текст, дождётся реплики пользователя и напечатает её. Это его следующее сообщение, отвечай следующим `say`. Так по кругу.
+   The command speaks the text, waits for the user's phrase and prints it. That is their next message, so answer it with the next `say`. Repeat.
 
-3. Флаги `say`:
-   - `--no-wait` - озвучить и не ждать ответа (перед долгой работой и для прощания);
-   - `--important` - пользователь не может перебить, кнопка микрофона в окне становится красной и зачёркнутой. Только для действительно важного: предупреждение перед необратимым действием, то, что нельзя пропустить. Им же можно договорить мысль, если пользователь раз за разом перебивает: начни с «подожди, дай договорю». Для обычных ответов не используй.
+4. Flags of `say`:
+   - `--no-wait` - speak and do not wait for a reply (before long work and for goodbyes);
+   - `--important` - the user cannot interrupt, and the microphone button in the window turns red and crossed out. Only for what really matters: a warning before an irreversible action, something that must not be missed. You can also use it to finish a thought when the user keeps interrupting: start with "wait, let me finish". Do not use it for ordinary answers.
 
-4. Попрощались - последняя фраза через `say --no-wait`, сразу за ней `python ~/.claude/skills/claude-call/call.py hangup`. Команда подождёт, пока договорит диктор и пока молчит пользователь. Если он успел что-то сказать, трубка не кладётся, а его слова возвращаются тебе: ответь на них. Не прощайся обычным `say`, он будет ждать ответа, а пользователь будет ждать, пока ты положишь трубку.
+5. To say goodbye, send the last sentence with `say --no-wait` and follow it right away with `python ~/.claude/skills/claude-call/call.py hangup`. The command waits until the voice has finished and the user is silent. If they managed to say something, the call stays up and their words come back to you: answer them. Do not say goodbye with a plain `say`, because it waits for a reply while the user waits for you to hang up.
 
-## Работа и разговор одновременно
+## Working and talking at the same time
 
-Пользователь хочет говорить с тобой, пока ты работаешь, как в обычном чате, где сообщение можно отправить посреди задачи. Способов два, выбирай сам по задаче.
+The user wants to talk to you while you work, the way a message can be sent mid-task in a normal chat. There are two ways, pick one by the task.
 
-Первый способ - помощник в фоне. Запусти задачу через Agent (он работает в фоне) или Bash с `run_in_background`, а сам оставайся на линии и слушай короткими отрезками:
+The first way is a helper in the background. Start the task through Agent (it runs in the background) or Bash with `run_in_background`, stay on the line yourself and listen in short stretches:
 
 ```bash
 python ~/.claude/skills/claude-call/call.py listen --wait=20
 ```
 
-Так ты слышишь пользователя сразу. Он что-то сказал - отвечай через `say --wait=20`. Пришло уведомление, что задача закончилась - проверь результат и расскажи итог голосом. Бери этот способ, когда задачу можно описать целиком и отдать: поиск по проекту, сборка, тесты, большая правка по понятному плану, всё, что идёт дольше полуминуты.
+This way you hear the user at once. When they say something, answer with `say --wait=20`. When the notification arrives that the task is finished, check the result and tell them the outcome by voice. Pick this way when the task can be described in full and handed off: a search through the project, a build, tests, a large edit with a clear plan, anything that takes longer than half a minute.
 
-Второй способ - работаешь сам и проверяешь между шагами. Между вызовами инструментов запускай `listen --wait=0`: он сразу вернёт то, что пользователь сказал за это время, или `[тишина]`. Ответ придёт с задержкой в несколько секунд. Бери этот способ, когда правка короткая, когда каждый шаг зависит от предыдущего и его не отдать помощнику, или когда вы разбираете код вместе и пользователю важно направлять тебя по ходу.
+The second way is to work yourself and check between steps. Between tool calls run `listen --wait=0`: it returns right away with whatever the user said in the meantime, or `[silence]`. The answer comes a few seconds late. Pick this way when the edit is short, when every step depends on the previous one and cannot be handed to a helper, or when you are going through code together and the user wants to steer you as you go.
 
-В обоих случаях сначала скажи голосом, что начал (`say --no-wait`), а в конце - что получилось. Если пользователь посреди работы меняет задачу, останови фоновую и начни новую, а не доделывай старую. Временные файлы за собой убирай.
+Either way, say by voice that you have started (`say --no-wait`), and at the end say what came of it. If the user changes the task in the middle, stop the background one and start the new one instead of finishing the old one. Clean up temporary files after yourself.
 
-`python ~/.claude/skills/claude-call/call.py mute` выключает микрофон пользователя, `mute off` включает обратно. Выключай его только по просьбе пользователя и не забудь включить, когда он попросит.
+`python ~/.claude/skills/claude-call/call.py mute` turns the user's microphone off, `mute off` turns it back on. Turn it off only when the user asks, and do not forget to turn it on when they ask.
 
-## Что приходит в ответ
+## What comes back
 
-| Вывод | Что это значит |
+| Output | What it means |
 |---|---|
-| просто текст | реплика пользователя. Если у него сохранён ключ Groq, знаки препинания настоящие. Без ключа есть только запятые, и стоят они там, где он сделал паузу, это не грамматика. Где смысл двоякий («казнить нельзя помиловать») - переспроси |
-| `[перебил] текст` | пользователь заговорил поверх диктора, твой ответ оборвался. Не повторяй его, отвечай на новое |
-| `[перебил] (неразборчиво)` | диктора оборвали, слов не разобрать. Коротко переспроси |
-| `[не озвучено: ...]` + текст | пока ты думал, пользователь сказал ещё что-то. Твой ответ не прозвучал, ответь заново с учётом новых слов |
-| `[трубка не положена: ...]` + текст | ты вызвал `hangup`, а пользователь ещё говорил. Ответь ему |
-| `[тишина]` | молчит 9 минут. Вызови `call.py listen` и жди дальше |
-| `[ошибка: ...]` | не сработал микрофон, распознавание или диктор. Если повторяется, положи трубку и напиши в чат, что сломалось |
-| `[пользователь положил трубку]` | звонок окончен. Больше не вызывай `say`, напиши в чат короткий итог, если было о чём |
-| `[звонок не активен ...]` | процесса звонка нет. Звони заново через `call`, если разговор не закончен |
+| plain text | the user's phrase. With a Groq key saved the punctuation is real. Without one there are only commas, and they stand where the user paused, not where grammar wants them. Where the meaning is ambiguous, ask |
+| `[interrupted] text` | the user spoke over the voice and your answer was cut off. Do not repeat it, answer the new thing |
+| `[interrupted] (unintelligible)` | the voice was cut off and no words could be made out. Ask briefly |
+| `[not spoken: ...]` + text | while you were thinking the user said something else. Your answer was not spoken, so answer again with the new words in mind |
+| `[not hung up: ...]` + text | you called `hangup` while the user was still talking. Answer them |
+| `[the user switched the call language to ...]` | the user pressed the language switch in the window. Speak that language from now on |
+| `[silence]` | nothing for nine minutes. Run `call.py listen` and keep waiting |
+| `[error: ...]` | the microphone, the recognition or the voice failed. If it repeats, hang up and write in the chat what broke |
+| `[the user hung up]` | the call is over. Do not call `say` again; write a short summary in the chat if there was something to summarize |
+| `[no active call ...]` | there is no call process. Call again with `call` if the conversation is not finished |
 
-## Как писать текст для диктора
+## Writing text for the voice
 
-- Быстрый диктор читает только русские буквы. Числа пиши словами («двадцать пять», а не «25»), английские слова кириллицей («Клод», «коммит», «пуш», «питон»). Цифры и латиницу он молча пропускает.
-- Текст слушают, а не читают. Короткие разговорные фразы. Никакой разметки, списков, кода, путей и ссылок вслух: код и длинные детали пиши в чат, а голосом скажи, что написал.
-- Английские слова и сокращения распознаватель слышит плохо («MIT» превращается в «it»). Если видишь в реплике обрывок латиницы, догадывайся по контексту или переспрашивай.
-- Реплики пользователя - его обычные сообщения: можно выполнять задачи, запускать инструменты, править файлы.
-- Распознавание ошибается. Бессмыслицу переспрашивай. Перед необратимым действием (удаление, push, отправка) повтори голосом, что понял, и дождись явного «да».
+- The neural voice reads only the letters of the call language: Latin letters in English, Cyrillic in Russian. It silently skips digits and the other alphabet. Write numbers as words ("twenty five", not "25") and spell foreign words in the call language's letters (in Russian: "Клод", "коммит", "пуш").
+- The text is heard, not read. Short spoken sentences. No markup, lists, code, paths or links out loud: put code and long details in the chat and say by voice that you wrote them there.
+- In a Russian call the recognizer hears English words and abbreviations poorly ("MIT" turns into "it"). If a phrase contains a stray scrap of Latin, work it out from context or ask.
+- The user's phrases are their ordinary messages: you can do tasks, run tools and edit files.
+- Recognition makes mistakes. Ask again about nonsense. Before an irreversible action (deleting, pushing, sending) repeat by voice what you understood and wait for a clear yes.
 
-Устройство, настройки и ограничения описаны в `README.md`. Лог ошибок лежит в `%TEMP%\claude-call.log`, там же видно, что услышал микрофон.
+How it works, the settings and the limitations are in `README.md`. The error log is in `%TEMP%\claude-call.log`, and it also shows what the microphone heard.

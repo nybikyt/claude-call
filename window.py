@@ -9,6 +9,8 @@ from PIL import Image, ImageDraw, ImageTk
 BACKGROUND, PLATE, BUTTON_GREY, SWITCH_OFF = '#1e1f22', '#2b2d31', '#383a40', '#4e5058'
 TEXT, DIM_TEXT = '#f2f3f5', '#b5bac1'
 GREEN, RED, CLAUDE_ORANGE = '#23a55a', '#f23f43', '#d97757'
+BASE_WIDTH, BASE_HEIGHT = 300, 500
+ZOOM_RANGE = (0.7, 1.8)
 BUTTON_CORNER = 0.3
 AVATAR_RADIUS = 0.34
 SPEAKING_RING_RADIUS = 0.37
@@ -17,8 +19,28 @@ PULSE_FRAMES = 12
 SWITCH_FRAMES = 6
 SWITCH_FRAME_MILLISECONDS = 16
 REFRESH_MILLISECONDS = 40
+RESIZE_SETTLE_MILLISECONDS = 150
 LONG_TEXT_LENGTH = 160
 DWM_DARK_MODE, DWM_CAPTION_COLOR = 20, 35
+
+STRINGS = {
+    'en': {
+        'window': 'Claude call', 'calling_claude': 'Calling Claude…', 'claude_calling': 'Claude is calling you',
+        'answer': 'Answer', 'decline': 'Decline', 'end': 'End call',
+        'microphone': 'Microphone', 'microphone_off': 'Microphone off',
+        'fast_voice': 'Fast voice', 'barge_in': 'Interrupt by voice',
+        'listening': 'listening', 'hearing': 'listening…', 'recognizing': 'recognizing…',
+        'thinking': 'Claude is thinking…', 'speaking': 'Claude is speaking…',
+    },
+    'ru': {
+        'window': 'Звонок Claude', 'calling_claude': 'Звоню Claude…', 'claude_calling': 'Claude звонит Вам',
+        'answer': 'Ответить', 'decline': 'Сбросить', 'end': 'Завершить',
+        'microphone': 'Микрофон', 'microphone_off': 'Микрофон выкл',
+        'fast_voice': 'Быстрый голос', 'barge_in': 'Перебивать голосом',
+        'listening': 'слушаю', 'hearing': 'слушаю…', 'recognizing': 'распознаю…',
+        'thinking': 'Claude думает…', 'speaking': 'Claude говорит…',
+    },
+}
 
 ICON_VIEWBOX = 960
 ICON_CURVE_STEPS = 8
@@ -99,7 +121,7 @@ def icon_outlines(path):
                                           for a, b, c in zip(position, control, target)))
             position = target
         else:
-            raise ValueError(f'команда {command} в контуре значка не поддержана')
+            raise ValueError(f'icon outline command {command} is not supported')
     return outlines
 
 
@@ -160,16 +182,23 @@ def run(app, from_user):
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('Claude.Call')
     root = tk.Tk()
     root.withdraw()
-    scale = root.winfo_fpixels('1i') / 96
+    screen_scale = root.winfo_fpixels('1i') / 96
+    logo = Image.open(app.HERE / 'logo.png')
+    ui = SimpleNamespace(zoom=min(max(app.settings['zoom'], ZOOM_RANGE[0]), ZOOM_RANGE[1]),
+                         resize_timer=None, others_ducked=not from_user, tick=0)
 
     def px(points):
-        return round(points * scale)
+        return round(points * screen_scale * ui.zoom)
 
-    width, height = px(300), px(500)
-    root.title('Звонок Claude')
+    def font(size, family='Segoe UI'):
+        return family, max(round(size * ui.zoom), 6)
+
     root.configure(bg=BACKGROUND)
-    root.resizable(False, False)
     root.attributes('-topmost', True)
+    root.minsize(*(round(side * screen_scale * ZOOM_RANGE[0]) for side in (BASE_WIDTH, BASE_HEIGHT)))
+    root.maxsize(*(round(side * screen_scale * ZOOM_RANGE[1]) for side in (BASE_WIDTH, BASE_HEIGHT)))
+    root.aspect(BASE_WIDTH, BASE_HEIGHT, BASE_WIDTH, BASE_HEIGHT)
+    width, height = px(BASE_WIDTH), px(BASE_HEIGHT)
     root.geometry(f'{width}x{height}+{root.winfo_screenwidth() - width - px(24)}'
                   f'+{root.winfo_screenheight() - height - px(90)}')
     root.protocol('WM_DELETE_WINDOW', app.finish)
@@ -180,137 +209,165 @@ def run(app, from_user):
     caption_color = int(BACKGROUND[5:7] + BACKGROUND[3:5] + BACKGROUND[1:3], 16)
     for attribute, value in ((DWM_DARK_MODE, 1), (DWM_CAPTION_COLOR, caption_color)):
         ctypes.windll.dwmapi.DwmSetWindowAttribute(window_handle, attribute, ctypes.byref(ctypes.c_int(value)), 4)
-
-    logo = Image.open(app.HERE / 'logo.png')
     taskbar_image = taskbar_icon(logo)
     taskbar_images = [ImageTk.PhotoImage(taskbar_image.resize((side, side), Image.LANCZOS))
                       for side in (256, 48, 32, 16)]
     root.iconphoto(True, *taskbar_images)
 
-    button_size, avatar_size = px(60), px(150)
-    muted_fill = '#%02x%02x%02x' % blend(RED, BACKGROUND, 0.22)
-    images = {name: ImageTk.PhotoImage(image) for name, image in {
-        'still': avatar_image(logo, avatar_size),
-        'speaking': avatar_image(logo, avatar_size, SPEAKING_RING_RADIUS, GREEN),
-        'answer': button_image(button_size, GREEN, partial(icon, 'call', color='white')),
-        'hangup': button_image(button_size, RED, partial(icon, 'call_end', color='white')),
-        'microphone': button_image(button_size, BUTTON_GREY, partial(icon, 'microphone', color=TEXT)),
-        'muted': button_image(button_size, muted_fill, partial(icon, 'microphone_off', color=RED)),
-        'locked': button_image(button_size, RED, partial(icon, 'microphone_off', color='white')),
-    }.items()}
-    pulse = [ImageTk.PhotoImage(ringing_avatar(logo, avatar_size, step / PULSE_FRAMES))
-             for step in range(PULSE_FRAMES)]
-    switch_frames = [ImageTk.PhotoImage(switch_image(px(44), px(26), step / SWITCH_FRAMES))
-                     for step in range(SWITCH_FRAMES + 1)]
-
-    avatar = tk.Label(root, image=images['still'], bg=BACKGROUND)
-    avatar.pack(pady=(px(6), 0))
-    title = tk.Label(root, text='Звоню Claude…' if from_user else 'Claude звонит Вам',
-                     font=('Segoe UI Semibold', 16), fg=TEXT, bg=BACKGROUND)
-    title.pack()
-    status = tk.Label(root, font=('Segoe UI', 10), fg=DIM_TEXT, bg=BACKGROUND)
-    status.pack(pady=(px(2), 0))
-    live = tk.Text(root, font=('Segoe UI', 10), fg=DIM_TEXT, bg=BACKGROUND, width=1, height=4, wrap='word', bd=0,
-                   highlightthickness=0, padx=px(24), cursor='arrow', state='disabled')
-    live.tag_configure('centered', justify='center')
-    live.pack(fill='x', pady=(px(8), px(6)))
-    buttons = tk.Frame(root, bg=BACKGROUND)
-    buttons.pack()
-
-    def call_button(image, caption, command):
-        frame = tk.Frame(buttons, bg=BACKGROUND)
-        picture = tk.Label(frame, image=images[image], bg=BACKGROUND, cursor='hand2')
-        picture.pack()
-        picture.bind('<Button-1>', lambda event: command())
-        label = tk.Label(frame, text=caption, font=('Segoe UI', 8), fg=DIM_TEXT, bg=BACKGROUND)
-        label.pack(pady=(px(4), 0))
-        return SimpleNamespace(frame=frame, picture=picture, label=label)
+    def choose_language(code):
+        if code != app.settings['language']:
+            app.set_language(code)
+            build()
 
     def toggle_mute():
         if not app.view['locked']:
             app.view['muted'] = not app.view['muted']
 
-    answer_button = call_button('answer', 'Ответить', app.answer)
-    mute_button = call_button('microphone', 'Микрофон', toggle_mute)
-    hangup_button = call_button('hangup', 'Сбросить', app.finish)
-    if not from_user:
-        answer_button.frame.pack(side='left', padx=px(18))
-    hangup_button.frame.pack(side='left', padx=px(18))
+    def call_button(parent, image, caption, command):
+        frame = tk.Frame(parent, bg=BACKGROUND)
+        picture = tk.Label(frame, image=ui.images[image], bg=BACKGROUND, cursor='hand2')
+        picture.pack()
+        picture.bind('<Button-1>', lambda event: command())
+        label = tk.Label(frame, text=caption, font=font(8), fg=DIM_TEXT, bg=BACKGROUND)
+        label.pack(pady=(px(4), 0))
+        return SimpleNamespace(frame=frame, picture=picture, label=label)
 
     def switch_row(setting, caption):
         row = tk.Frame(root, bg=BACKGROUND)
-        tk.Label(row, text=caption, font=('Segoe UI', 10), fg=TEXT, bg=BACKGROUND).pack(side='left')
+        tk.Label(row, text=caption, font=font(10), fg=TEXT, bg=BACKGROUND).pack(side='left')
         frame = SWITCH_FRAMES if app.settings[setting] else 0
-        switch = tk.Label(row, image=switch_frames[frame], bg=BACKGROUND, cursor='hand2')
+        switch = tk.Label(row, image=ui.switch_frames[frame], bg=BACKGROUND, cursor='hand2')
         switch.pack(side='right')
 
         def slide():
             nonlocal frame
             target = SWITCH_FRAMES if app.settings[setting] else 0
-            if frame != target:
+            if frame != target and switch.winfo_exists():
                 frame += 1 if target > frame else -1
-                switch.config(image=switch_frames[frame])
+                switch.config(image=ui.switch_frames[frame])
                 root.after(SWITCH_FRAME_MILLISECONDS, slide)
 
         def flip(event):
-            app.settings[setting] = not app.settings[setting]
-            app.save_settings()
+            app.save_setting(setting, not app.settings[setting])
             slide()
 
         switch.bind('<Button-1>', flip)
         row.pack(side='bottom', fill='x', padx=px(28), pady=px(6))
 
-    tk.Frame(root, height=px(12), bg=BACKGROUND).pack(side='bottom')
-    switch_row('barge_in', 'Перебивать голосом')
-    switch_row('fast', 'Быстрый голос')
+    def build():
+        for child in root.winfo_children():
+            child.destroy()
+        ui.strings = STRINGS[app.settings['language']]
+        ui.connected = False
+        ui.shown_text = None
+        root.title(ui.strings['window'])
 
-    if app.DUCKED_VOLUMES_FILE.exists():
-        app.duck_other_apps(False)
-    others_ducked = not from_user
-    if others_ducked:
-        app.duck_other_apps(True)
-    connected = False
-    shown_text = ''
-    tick = 0
+        button_size, avatar_size = px(60), px(150)
+        muted_fill = '#%02x%02x%02x' % blend(RED, BACKGROUND, 0.22)
+        ui.images = {name: ImageTk.PhotoImage(image) for name, image in {
+            'still': avatar_image(logo, avatar_size),
+            'speaking': avatar_image(logo, avatar_size, SPEAKING_RING_RADIUS, GREEN),
+            'answer': button_image(button_size, GREEN, partial(icon, 'call', color='white')),
+            'hangup': button_image(button_size, RED, partial(icon, 'call_end', color='white')),
+            'microphone': button_image(button_size, BUTTON_GREY, partial(icon, 'microphone', color=TEXT)),
+            'muted': button_image(button_size, muted_fill, partial(icon, 'microphone_off', color=RED)),
+            'locked': button_image(button_size, RED, partial(icon, 'microphone_off', color='white')),
+        }.items()}
+        ui.pulse = [ImageTk.PhotoImage(ringing_avatar(logo, avatar_size, step / PULSE_FRAMES))
+                    for step in range(PULSE_FRAMES)]
+        ui.switch_frames = [ImageTk.PhotoImage(switch_image(px(44), px(26), step / SWITCH_FRAMES))
+                            for step in range(SWITCH_FRAMES + 1)]
+
+        languages = tk.Frame(root, bg=BACKGROUND)
+        languages.place(relx=1, x=-px(12), y=px(8), anchor='ne')
+        for code in app.LANGUAGES:
+            chosen = code == app.settings['language']
+            label = tk.Label(languages, text=code.upper(), font=font(8, 'Segoe UI Semibold'),
+                             fg=TEXT if chosen else DIM_TEXT, bg=BACKGROUND, cursor='hand2')
+            label.pack(side='left', padx=px(3))
+            label.bind('<Button-1>', lambda event, code=code: choose_language(code))
+
+        ui.avatar = tk.Label(root, image=ui.images['still'], bg=BACKGROUND)
+        ui.avatar.pack(pady=(px(6), 0))
+        ui.title = tk.Label(root, text=ui.strings['calling_claude' if from_user else 'claude_calling'],
+                            font=font(16, 'Segoe UI Semibold'), fg=TEXT, bg=BACKGROUND)
+        ui.title.pack()
+        ui.status = tk.Label(root, font=font(10), fg=DIM_TEXT, bg=BACKGROUND)
+        ui.status.pack(pady=(px(2), 0))
+        ui.live = tk.Text(root, font=font(10), fg=DIM_TEXT, bg=BACKGROUND, width=1, height=4, wrap='word', bd=0,
+                          highlightthickness=0, padx=px(24), cursor='arrow', state='disabled')
+        ui.live.tag_configure('centered', justify='center')
+        ui.live.pack(fill='x', pady=(px(8), px(6)))
+        buttons = tk.Frame(root, bg=BACKGROUND)
+        buttons.pack()
+        ui.answer_button = call_button(buttons, 'answer', ui.strings['answer'], app.answer)
+        ui.mute_button = call_button(buttons, 'microphone', ui.strings['microphone'], toggle_mute)
+        ui.hangup_button = call_button(buttons, 'hangup', ui.strings['decline'], app.finish)
+        if not from_user:
+            ui.answer_button.frame.pack(side='left', padx=px(18))
+        ui.hangup_button.frame.pack(side='left', padx=px(18))
+
+        tk.Frame(root, height=px(12), bg=BACKGROUND).pack(side='bottom')
+        switch_row('barge_in', ui.strings['barge_in'])
+        switch_row('fast', ui.strings['fast_voice'])
 
     def show_live_text(text):
-        nonlocal shown_text
-        if text == shown_text:
+        if text == ui.shown_text:
             return
-        shown_text = text
-        live.config(state='normal', font=('Segoe UI', 9 if len(text) > LONG_TEXT_LENGTH else 10))
-        live.delete('1.0', 'end')
-        live.insert('1.0', text, 'centered')
-        live.config(state='disabled')
+        ui.shown_text = text
+        ui.live.config(state='normal', font=font(9 if len(text) > LONG_TEXT_LENGTH else 10))
+        ui.live.delete('1.0', 'end')
+        ui.live.insert('1.0', text, 'centered')
+        ui.live.config(state='disabled')
 
     def refresh():
-        nonlocal connected, others_ducked, tick
-        if others_ducked and app.call_state != 'ringing':
-            others_ducked = False
+        if ui.others_ducked and app.call_state != 'ringing':
+            ui.others_ducked = False
             app.duck_other_apps(False)
         if app.call_state == 'ended':
             return root.destroy()
-        tick += 1
+        ui.tick += 1
         if from_user and app.call_state == 'ringing' and app.voice_ready.is_set():
             app.answer()
         if app.call_state == 'ringing':
-            avatar.config(image=pulse[tick // 2 % PULSE_FRAMES])
+            ui.avatar.config(image=ui.pulse[ui.tick // 2 % PULSE_FRAMES])
         else:
-            avatar.config(image=images['speaking' if app.announcer_speaking.is_set() else 'still'])
-        if app.call_state == 'talking' and not connected:
-            connected = True
-            title.config(text='Claude')
-            answer_button.frame.pack_forget()
-            mute_button.frame.pack(side='left', padx=px(18), before=hangup_button.frame)
-            hangup_button.label.config(text='Завершить')
-        if connected:
+            ui.avatar.config(image=ui.images['speaking' if app.announcer_speaking.is_set() else 'still'])
+        if app.call_state == 'talking' and not ui.connected:
+            ui.connected = True
+            ui.title.config(text='Claude')
+            ui.answer_button.frame.pack_forget()
+            ui.mute_button.frame.pack(side='left', padx=px(18), before=ui.hangup_button.frame)
+            ui.hangup_button.label.config(text=ui.strings['end'])
+        if ui.connected:
             muted, locked = app.view['muted'], app.view['locked']
-            mute_button.picture.config(image=images['locked' if locked else 'muted' if muted else 'microphone'])
-            mute_button.label.config(text='Микрофон выкл' if muted else 'Микрофон')
-            status.config(text=app.view['status'])
+            ui.mute_button.picture.config(image=ui.images['locked' if locked else 'muted' if muted else 'microphone'])
+            ui.mute_button.label.config(text=ui.strings['microphone_off' if muted else 'microphone'])
+            ui.status.config(text=ui.strings.get(app.view['status'], ''))
             show_live_text(app.view['live'])
         root.after(REFRESH_MILLISECONDS, refresh)
 
+    def apply_new_size():
+        ui.resize_timer = None
+        zoom = min(max(root.winfo_width() / (BASE_WIDTH * screen_scale), ZOOM_RANGE[0]), ZOOM_RANGE[1])
+        if abs(zoom - ui.zoom) > 0.02:
+            ui.zoom = zoom
+            app.save_setting('zoom', round(zoom, 2))
+            build()
+            root.geometry(f'{px(BASE_WIDTH)}x{px(BASE_HEIGHT)}')
+
+    def window_resized(event):
+        if event.widget is root:
+            if ui.resize_timer:
+                root.after_cancel(ui.resize_timer)
+            ui.resize_timer = root.after(RESIZE_SETTLE_MILLISECONDS, apply_new_size)
+
+    if app.DUCKED_VOLUMES_FILE.exists():
+        app.duck_other_apps(False)
+    if ui.others_ducked:
+        app.duck_other_apps(True)
+    build()
     refresh()
+    root.bind('<Configure>', window_resized)
     root.deiconify()
     root.mainloop()
