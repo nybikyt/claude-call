@@ -16,6 +16,8 @@ Start talking over the voice and it stops, and Claude gets your words marked as 
 
 Claude cannot hang up while you are still talking. The command waits for the end of your phrase and hands your words back to it.
 
+Every Claude Code session has its own call, and the window shows which session is on the line. You talk to one at a time: start a call in another session and the previous one ends, and its Claude is told that you moved on. You can also ask by voice to be put through to another session, and Claude will have that session call you.
+
 The window has two switches. "Fast voice" picks the voice: the neural one sounds nicer but holds about 300 MB of memory, while the Windows system voice takes almost none. "Interrupt by voice" can be turned off if the voice keeps cutting itself off through loudspeakers, and then the microphone stays silent while Claude speaks.
 
 Drag a window edge to make it smaller or larger; everything inside scales with it and the size is remembered. EN / RU in the top right corner switches the call language, and Claude is told to switch with you.
@@ -47,11 +49,11 @@ The key goes into `settings.json` next to the script, and that file is not track
 
 ## How it works
 
-One background process runs for the length of the call. It holds the window, the microphone, the speech detector, the voice and a small HTTP server on `127.0.0.1:8765`. Claude drives the call with `call.py` commands, which talk to that server using a one-time token:
+One background process runs for the length of the call. It holds the window, the microphone, the speech detector, the voice and a small HTTP server on a local port. Claude drives the call with `call.py` commands, which find the server and its one-time token in `calls/<session id>.json`, so a command from one session never reaches another session's call:
 
 | Command | What it does |
 |---|---|
-| `call [--from-user] [greeting]` | places the call, says the greeting and returns the first phrase |
+| `call [--from-user] [--name=session] [greeting]` | places the call, says the greeting and returns the first phrase; the name is shown in the window |
 | `say [--no-wait] [--important]` | speaks the text and waits for the reply |
 | `listen [--wait=seconds]` | waits for a phrase without saying anything; with `--wait=0` it returns what has already been said |
 | `mute [on\|off]` | turns the user's microphone off or on |

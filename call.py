@@ -1,6 +1,8 @@
 """Voice calls with Claude Code.
 
-  call [--from-user] [greeting]  place the call, say the greeting and wait for the first phrase
+  call [--from-user] [--name=session] [greeting]
+                                 place the call, say the greeting and wait for the first phrase;
+                                 the name tells the user which session is on the line
   say [--no-wait] [--important]  speak the text (stdin or arguments) and wait for the reply
   listen [--wait=seconds]        wait for a phrase without speaking; --wait=0 returns only what was already said
   mute [on|off]                  turn the user's microphone off or on
@@ -30,11 +32,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).parent
-TOKEN_FILE = HERE / '.token'
+SESSION_ID = os.environ.get('CLAUDE_CODE_SESSION_ID', 'default')
+CALLS_DIRECTORY = HERE / 'calls'
+CALL_FILE = CALLS_DIRECTORY / f'{SESSION_ID}.json'
 SETTINGS_FILE = HERE / 'settings.json'
 DUCKED_VOLUMES_FILE = HERE / 'ducked.json'
 LOG_FILE = Path(tempfile.gettempdir()) / 'claude-call.log'
-PORT = 8765
+ANOTHER_CALL = 'another call'
 
 DEFAULT_LANGUAGE = 'en'
 LANGUAGES = {
@@ -116,7 +120,7 @@ if SETTINGS_FILE.exists():
 if settings['language'] not in LANGUAGES:
     settings['language'] = DEFAULT_LANGUAGE
 start_time = last_command_time = time.monotonic()
-token = ''
+token = session_name = ''
 
 
 def save_setting(name, value):
@@ -194,13 +198,13 @@ def answer():
         ringing_finished.set()
 
 
-def finish():
+def finish(reason=''):
     global call_state
     if call_state == 'ended':
         return
     call_state = 'ended'
     stop_ringing()
-    heard_events.put({'hangup': True})
+    heard_events.put({'hangup': True, 'reason': reason})
     ringing_finished.set()
 
 
@@ -238,7 +242,7 @@ def set_mute(body):
 
 def hang_up(body):
     if body.get('now'):
-        finish()
+        finish(body.get('reason', ''))
         return {'hung_up': True, 'events': []}
     deadline = time.monotonic() + HANGUP_TIMEOUT
     while ((speech_queue.unfinished_tasks or user_speaking.is_set() or recorded_utterances.unfinished_tasks)
@@ -276,22 +280,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.wfile.write(reply)
 
 
-class BridgeServer(ThreadingHTTPServer):
-    allow_reuse_address = False
-
-
 def start_bridge():
-    global token
-    token = TOKEN_FILE.read_text()
-    deadline = time.monotonic() + 5
-    while True:
-        try:
-            server = BridgeServer(('127.0.0.1', PORT), BridgeHandler)
-            break
-        except OSError:
-            if time.monotonic() > deadline:
-                raise
-            time.sleep(0.2)
+    global token, session_name
+    call = json.loads(CALL_FILE.read_text())
+    token, session_name = call['token'], call['name']
+    server = ThreadingHTTPServer(('127.0.0.1', 0), BridgeHandler)
+    CALL_FILE.write_text(json.dumps({**call, 'port': server.server_address[1]}))
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
@@ -643,26 +637,36 @@ def serve(from_user):
     window.run(sys.modules[__name__], from_user)
     finish()
     time.sleep(REPLY_FLUSH_SECONDS)
-    TOKEN_FILE.unlink(missing_ok=True)
+    if CALL_FILE.exists() and json.loads(CALL_FILE.read_text())['token'] == token:
+        CALL_FILE.unlink()
     os._exit(0)
 
 
-def request(path, body=None, timeout=REPLY_TIMEOUT + 30):
-    url = f'http://127.0.0.1:{PORT}{path}?t={TOKEN_FILE.read_text()}'
+def request(path, body=None, timeout=REPLY_TIMEOUT + 30, call_file=None):
+    call = json.loads((call_file or CALL_FILE).read_text())
+    if 'port' not in call:
+        raise ConnectionError('the call is still starting')
+    url = f"http://127.0.0.1:{call['port']}{path}?t={call['token']}"
     without_proxy = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     with without_proxy.open(urllib.request.Request(url, json.dumps(body or {}).encode()), timeout=timeout) as response:
         return json.load(response)
 
 
-def start_call(from_user, greeting):
+def end_other_calls():
+    CALLS_DIRECTORY.mkdir(exist_ok=True)
+    for call_file in CALLS_DIRECTORY.glob('*.json'):
+        try:
+            request('/hangup', {'now': True, 'reason': ANOTHER_CALL}, timeout=2, call_file=call_file)
+        except (OSError, ValueError):
+            call_file.unlink(missing_ok=True)
+
+
+def start_call(from_user, greeting, name):
     download_model(DETECTOR_FILE, DETECTOR_URL)
     if settings['fast']:
         download_model(language()['voice_file'], language()['voice_url'])
-    try:
-        request('/hangup', {'now': True}, timeout=2)
-    except OSError:
-        pass
-    TOKEN_FILE.write_text(secrets.token_urlsafe(16))
+    end_other_calls()
+    CALL_FILE.write_text(json.dumps({'token': secrets.token_urlsafe(16), 'name': name or Path.cwd().name}))
     detached = ({'creationflags': subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
                 if os.name == 'nt' else {'start_new_session': True})
     command = [sys.executable, __file__, 'serve', *(['--from-user'] if from_user else [])]
@@ -673,7 +677,7 @@ def start_call(from_user, greeting):
         try:
             request('/say', {'text': greeting, 'wait': False})
             break
-        except OSError:
+        except (OSError, ValueError):
             if time.monotonic() > deadline:
                 sys.exit(f'[the call did not start, see {LOG_FILE}]')
             time.sleep(0.2)
@@ -689,7 +693,8 @@ def print_events(result, waited=True):
         print('[not spoken: the user spoke first - answer again with their words in mind]')
     for event in result['events']:
         if event.get('hangup'):
-            print('[the user hung up]')
+            print('[the call ended: the user started a call with another session]'
+                  if event.get('reason') == ANOTHER_CALL else '[the user hung up]')
         elif event.get('error'):
             print(f"[error: {event['error']}]")
         elif event.get('language'):
@@ -710,7 +715,8 @@ def main():
         stream.reconfigure(encoding='utf-8')
     try:
         if command == 'call':
-            start_call('--from-user' in flags, words)
+            name = next((flag.partition('=')[2] for flag in flags if flag.startswith('--name=')), '')
+            start_call('--from-user' in flags, words, name)
         elif command in ('say', 'listen'):
             wait = '--no-wait' not in flags
             text = '' if command == 'listen' else words or sys.stdin.read()
@@ -732,7 +738,7 @@ def main():
                 print_events(result)
         else:
             print(__doc__)
-    except OSError:
+    except (OSError, ValueError):
         sys.exit('[no active call - start with call]')
 
 

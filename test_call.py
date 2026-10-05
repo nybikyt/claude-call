@@ -1,4 +1,5 @@
 import collections
+import json
 import tempfile
 import threading
 import urllib.error
@@ -6,26 +7,27 @@ from pathlib import Path
 
 import call
 
-call.PORT = 8799
-call.TOKEN_FILE = Path(tempfile.gettempdir()) / 'claude-call-test.token'
+call.CALL_FILE = Path(tempfile.gettempdir()) / 'claude-call-test-call.json'
 call.SETTINGS_FILE = Path(tempfile.gettempdir()) / 'claude-call-test-settings.json'
 call.SETTINGS_FILE.unlink(missing_ok=True)
-call.TOKEN_FILE.write_text('test-token')
+call.CALL_FILE.write_text(json.dumps({'token': 'test-token', 'name': 'tests'}))
 call.stop_ringing = lambda: None
 call.start_bridge()
+this_call = json.loads(call.CALL_FILE.read_text())
+assert call.session_name == 'tests' and this_call['port']
 
 
 def later(action, *arguments):
     threading.Timer(0.3, action, arguments).start()
 
 
-call.TOKEN_FILE.write_text('wrong')
+call.CALL_FILE.write_text(json.dumps({**this_call, 'token': 'wrong'}))
 try:
     call.request('/say')
     raise AssertionError('a wrong token was accepted')
 except urllib.error.HTTPError as error:
     assert error.code == 403
-call.TOKEN_FILE.write_text('test-token')
+call.CALL_FILE.write_text(json.dumps(this_call))
 
 call.settings['language'] = 'en'
 later(call.answer)
@@ -65,8 +67,8 @@ assert call.request('/hangup') == {
     'hung_up': False, 'events': [{'text': 'wait, I am not done', 'interrupted': False}]}
 assert call.call_state == 'talking'
 
-assert call.request('/hangup') == {'hung_up': True, 'events': []}
-assert call.request('/say', {'text': ''})['events'] == [{'hangup': True}]
+assert call.request('/hangup', {'now': True, 'reason': call.ANOTHER_CALL}) == {'hung_up': True, 'events': []}
+assert call.request('/say', {'text': ''})['events'] == [{'hangup': True, 'reason': call.ANOTHER_CALL}]
 
 assert call.with_commas('Казнить нельзя помиловать', [0.30]) == 'Казнить, нельзя помиловать'
 assert call.with_commas('Казнить нельзя помиловать', [0.57]) == 'Казнить нельзя, помиловать'
@@ -85,4 +87,5 @@ assert call.comma_pauses([(5, 0.128), (20, 0.32)], collections.deque([0.3] * 10)
 assert call.comma_pauses([], collections.deque()) == []
 
 call.SETTINGS_FILE.unlink(missing_ok=True)
+call.CALL_FILE.unlink(missing_ok=True)
 print('ok')

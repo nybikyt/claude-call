@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageTk
 BACKGROUND, PLATE, BUTTON_GREY, SWITCH_OFF = '#1e1f22', '#2b2d31', '#383a40', '#4e5058'
 TEXT, DIM_TEXT = '#f2f3f5', '#b5bac1'
 GREEN, RED, CLAUDE_ORANGE = '#23a55a', '#f23f43', '#d97757'
-BASE_WIDTH, BASE_HEIGHT = 300, 500
+BASE_WIDTH, BASE_HEIGHT = 300, 516
 ZOOM_RANGE = (0.7, 1.8)
 BUTTON_CORNER = 0.3
 AVATAR_RADIUS = 0.34
@@ -260,7 +260,7 @@ def run(app, from_user):
         ui.strings = STRINGS[app.settings['language']]
         ui.connected = False
         ui.shown_text = None
-        root.title(ui.strings['window'])
+        root.title(f"{ui.strings['window']} - {app.session_name}")
 
         button_size, avatar_size = px(60), px(150)
         muted_fill = '#%02x%02x%02x' % blend(RED, BACKGROUND, 0.22)
@@ -292,6 +292,7 @@ def run(app, from_user):
         ui.title = tk.Label(root, text=ui.strings['calling_claude' if from_user else 'claude_calling'],
                             font=font(16, 'Segoe UI Semibold'), fg=TEXT, bg=BACKGROUND)
         ui.title.pack()
+        tk.Label(root, text=app.session_name, font=font(8), fg=DIM_TEXT, bg=BACKGROUND).pack()
         ui.status = tk.Label(root, font=font(10), fg=DIM_TEXT, bg=BACKGROUND)
         ui.status.pack(pady=(px(2), 0))
         ui.live = tk.Text(root, font=font(10), fg=DIM_TEXT, bg=BACKGROUND, width=1, height=4, wrap='word', bd=0,
